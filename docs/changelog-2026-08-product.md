@@ -54,7 +54,7 @@
             </div>
             <div>
               <h3 class="text-xl font-semibold text-white mb-2">Server-side queries when they actually help</h3>
-              <p class="text-white/40 leading-relaxed">Asking for a specific role runs an AT-SPI collection query that matches server-side in one round trip — measured at 5 ms versus 47 ms on a large app. Asking for everything still uses a tree walk, because that turned out to be a wash. The tool picks based on the measurement and tells you which path it took.</p>
+              <p class="text-white/40 leading-relaxed">Reads run as an AT-SPI collection query that matches server-side in one round trip, with the climb back to each match memoized. Measured across six applications, five are 1.1x to 5.9x faster than walking the tree with byte-identical results; the sixth cannot resolve every match, so the read is automatically re-run as a walk rather than returning an incomplete answer. The output always says which path it took.</p>
             </div>
           </div>
         </div>
