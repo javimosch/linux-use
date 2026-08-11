@@ -2,11 +2,11 @@
 
 Agent-first, CLI-first GUI control for Linux desktops — the Linux answer to
 [Windows-Use](https://github.com/Jeomon/Windows-Use), built in
-[machin (MFL)](https://github.com/javimosch/machin) as a single 145 KB binary
+[machin (MFL)](https://github.com/javimosch/machin) as a single 154 KB binary
 with no runtime dependencies.
 
-**v0.2.0** — perception, actuation, an event stream, and a warm-registry
-daemon, aligned to [cli-specs.intrane.fr](https://cli-specs.intrane.fr/).
+**v0.3.0** — perception (walk + server-side collection queries), actuation, a
+filterable event stream, and a warm-registry daemon, aligned to [cli-specs.intrane.fr](https://cli-specs.intrane.fr/).
 
 ## The design bet
 
@@ -54,7 +54,7 @@ that expose no action. Prefer `act`.
 ```
 apps                          list applications exposing accessibility
 windows [--app X]             top-level windows: geometry, title, active
-state --app X [--depth N] [--role R] [--all]
+state --app X [--depth N] [--role R] [--all] [--collection|--walk]
 find <query> [--app X]        search elements by name substring
 act <ref> [--action N]        invoke the accessible action (preferred)
 read <ref>                    text, name, description
@@ -62,8 +62,9 @@ type <ref> <text> [--replace] [--allow-password]
 key <combo>                   e.g. ctrl+shift+t   (X11 only)
 click <ref> | --x N --y N [--button B]
 launch <cmd> [--wait-for APP] [--timeout MS]
-watch [--app X] [--events ...] [--max-events N] [--duration MS]
+watch [--app X] [--role R] [--events ...] [--max-events N] [--duration MS]
                               stream AT-SPI events as NDJSON
+roles                         every valid --role name
 pointer                       current pointer position
 doctor                        environment health
 serve [--port] | daemon start|stop|status
@@ -95,10 +96,40 @@ Two behaviours worth knowing:
   `state-changed:checked` churn induced by linux-use's own walks. That event
   type is therefore **not** in the default set (opt back in with `--events`);
   the same run then yielded 38 events, all genuine.
+- **`--role` is the cheapest noise filter.** One sample run went from 54 events
+  to the 6 that mattered by adding `--role editbar`.
 - **A label's name IS its text.** So a ref captured from an event on a label
   reports `ref_stale` on the next read — correctly: the staleness *is* the
   signal that the content changed. Drop the `#fingerprint` to address the path
   alone, or re-run `state`.
+
+## Collection queries: measured, not assumed
+
+`state`/`find` can either walk the tree or ask AT-SPI's **Collection** interface
+to match server-side in one round trip. The win scales with *selectivity*:
+
+| case | collection | walk |
+|---|---|---|
+| gnome-calculator, all interactive roles | **48 ms** | 81 ms |
+| gnome-control-center, all interactive roles | 52 ms | 51 ms |
+| gnome-control-center, `--role "push button"` (3 of 307 nodes) | **5 ms** | 47 ms |
+
+A narrow query is ~9x faster; asking for *everything* interactive is a wash,
+because a collection match arrives as a bare node and its ref has to be
+rebuilt by walking back up — which costs what the query saved.
+
+So the default is **collection when `--role` narrows it, walk otherwise**.
+`--collection` / `--walk` force either; `method` in the output says which ran.
+
+The one trade-off: a collection match whose path cannot be *proven* is emitted
+with `ref_ok:false` (matched and on-screen, but no ref) rather than dropped or
+guessed. On gnome-control-center's full interactive set, 14 of 37 came back
+that way; with a `--role` filter, 3 of 3 were fully pathed. Use `--walk` when
+you need a ref for every element.
+
+`linux-use roles` lists all 130 role names and flags the 18 that are
+interactive by default. An unknown `--role` matches nothing and says so on
+stderr instead of silently returning zero.
 
 ## Depth: shallow answers are now loud
 
@@ -168,6 +199,10 @@ Exit codes: `0` ok · `80` usage · `81` no_a11y · `82` app_not_found ·
 - **watch**: 450 events streamed while driving the app; `--max-events 5`
   returned exactly 5; an event ref resolved to the right widget once the
   volatile fingerprint was accounted for.
+- **Collection**: identical refs to the walk on gnome-calculator (28/28) and
+  zero wrong refs on gnome-control-center after the index fix; ~9x faster on a
+  narrow `--role` query.
+- **watch --role**: 54 events → 6 with `--role editbar`.
 - **watch memory**: 8436 kB → **8436 kB** across 450 events after the arena fix
   (before it: 8304 → 15812 kB, ~17 kB leaked per event).
 
@@ -198,11 +233,22 @@ These cost real debugging time and are the non-obvious part of this codebase.
    exactly zero. Two constraints: the callback must be **captureless** (globals
    only — a captured variable is a compile error), and **no `return` may appear
    inside the arena block** (ARENA002), so early exits become a flag.
-7. **`atspi_accessible_get_index_in_parent` can return -1.** Skipping such a
-   level while reconstructing a path silently produces a ref that *looks* valid
-   and resolves to the WRONG widget. Fall back to scanning the parent's
-   children, and if that fails too, report the ref as unusable.
-8. MFL specifics: `for` is range-only (use `while`); no `eprintln`
+7. **`atspi_accessible_get_index_in_parent` cannot be trusted, in two ways.**
+   It returns -1 for some nodes (skipping that level builds a ref that looks
+   valid and resolves to the WRONG widget), and — worse — it can return a
+   *confidently wrong* non-negative value: in gnome-control-center it reported
+   0 for a child actually at index 1, producing refs that did not resolve at
+   all. Refs are addressed with `get_child_at_index`, so that is the authority:
+   treat the index as a hint, verify it, and scan the parent when it fails.
+8. **`atspi_accessible_get_id` is not a usable identity here.** Tried as a
+   fallback for pointer comparison, it produced false matches and therefore
+   confidently wrong refs — worse than admitting ignorance. Reverted to pointer
+   identity, accepting `ref_ok:false` for the nodes it cannot prove.
+9. **An empty AT-SPI match criterion must use `MATCH_ALL`, not `MATCH_ANY`.**
+   "Any of zero" is false, so a rule with `MATCH_ANY` over NULL attributes and
+   interfaces matches *nothing* — the query runs, succeeds, and returns an
+   empty array. Only the roles list uses `MATCH_ANY`.
+10. MFL specifics: `for` is range-only (use `while`); no `eprintln`
    (`write(2, …)`); `int()` does not parse strings (`parse_int`); lowercase is
    `to_lower`; a lambda passed to `serve` must be inlined at the call site for
    struct-field inference to flow.
@@ -221,11 +267,11 @@ These cost real debugging time and are the non-obvious part of this codebase.
 - `watch` cannot yet filter by role or dedupe repeated events; a chatty app can
   produce a lot of lines. Bound it with `--max-events`/`--duration`.
 
-## Next (v0.3)
+## Next (v0.4)
 
-1. `atspi_collection_get_matches` — server-side filtering, one D-Bus round trip
-   instead of per-property chatter (the remaining perf win).
-2. `watch --role` filtering + consecutive-event dedupe.
+1. Cheap path reconstruction for collection matches — the remaining bottleneck,
+   and what would make collection the unconditional default.
+2. Consecutive-event dedupe in `watch`.
 3. Injector backend abstraction (`xtest | uinput | libei | portal`) so Wayland
    becomes a backend rather than a rewrite.
 4. The remaining three specs: update, feedback, telemetry.

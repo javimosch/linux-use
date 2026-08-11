@@ -36,6 +36,8 @@ extern "atspi" {
 	fn atspi_generate_keyboard_event(i64, string, i32, ptr) bool
 	fn atspi_accessible_get_parent(ptr, ptr) ptr
 	fn atspi_accessible_get_index_in_parent(ptr, ptr) i32
+	fn atspi_accessible_get_id(ptr, ptr) i32
+	fn atspi_role_get_name(i32) ptr
 	fn atspi_event_listener_new(cb(ptr, ptr), ptr, ptr) ptr
 	fn atspi_event_listener_register(ptr, string, ptr) bool
 	fn atspi_event_main()
@@ -59,6 +61,17 @@ extern "lu" {
 	fn lu_ev_source(ptr) ptr
 	fn lu_ev_detail1(ptr) i32
 	fn lu_ev_detail2(ptr) i32
+	fn lu_roles_new() ptr
+	fn lu_roles_add(ptr, i32)
+	fn lu_role_from_name(string) i32
+	fn lu_rule_new(ptr, i32) ptr
+	fn lu_matches(ptr, ptr, i32) ptr
+	fn lu_arr_len(ptr) i32
+	fn lu_arr_get(ptr, i32) ptr
+	fn lu_arr_free(ptr)
+	fn lu_rule_free(ptr)
+	fn lu_roles_free(ptr)
+	fn lu_role_count() i32
 }
 
 extern "x11" {
@@ -104,7 +117,7 @@ var ST_VISIBLE = 30
 var COORD_SCREEN = 0
 var KEY_STRING = 4
 
-var VERSION = "0.2.0"
+var VERSION = "0.3.0"
 var SCHEMA = "linux-use/v1"
 
 // ---------------------------------------------------------------- json utils
@@ -337,7 +350,115 @@ func extents(node) (x, y, w, h) {
 }
 
 func interactive(role) (b) {
-	b = role == "push button" || role == "toggle button" || role == "check box" || role == "radio button" || role == "menu item" || role == "check menu item" || role == "radio menu item" || role == "entry" || role == "text" || role == "password text" || role == "combo box" || role == "link" || role == "list item" || role == "page tab" || role == "slider" || role == "menu" || role == "table cell" || role == "spin button"
+	b = false
+	rs := interactive_roles()
+	i := 0
+	while i < len(rs) {
+		if rs[i] == role {
+			b = true
+			return
+		}
+		i = i + 1
+	}
+}
+
+// interactive_roles is the default element filter, as role NAMES. The walk
+// matches these by string; the collection query converts them to AtspiRole
+// ordinals and lets the server do the matching.
+func interactive_roles() (r) {
+	r = []string{}
+	r = append(r, "push button")
+	r = append(r, "toggle button")
+	r = append(r, "check box")
+	r = append(r, "radio button")
+	r = append(r, "menu item")
+	r = append(r, "check menu item")
+	r = append(r, "radio menu item")
+	r = append(r, "entry")
+	r = append(r, "text")
+	r = append(r, "password text")
+	r = append(r, "combo box")
+	r = append(r, "link")
+	r = append(r, "list item")
+	r = append(r, "page tab")
+	r = append(r, "slider")
+	r = append(r, "menu")
+	r = append(r, "table cell")
+	r = append(r, "spin button")
+}
+
+// collect runs a server-side collection query and returns JSON rows. ok=false
+// means the app exposes no Collection interface and the caller must fall back
+// to walking. Unmatched roles are reported so a typo is not silent.
+func collect(appname, app, rolefilter, maxnodes) (out, n, ok, unknown) {
+	out = []string{}
+	n = 0
+	ok = false
+	unknown = ""
+	names := interactive_roles()
+	if len(rolefilter) > 0 {
+		names = []string{rolefilter}
+	}
+	ra := lu_roles_new()
+	added := 0
+	i := 0
+	while i < len(names) {
+		rid := lu_role_from_name(names[i])
+		if rid >= 0 {
+			lu_roles_add(ra, rid)
+			added = added + 1
+		} else {
+			if len(unknown) == 0 {
+				unknown = names[i]
+			}
+		}
+		i = i + 1
+	}
+	if added == 0 {
+		lu_roles_free(ra)
+		return
+	}
+	rule := lu_rule_new(ra, 1)
+	// The Collection interface does not traverse down from an APPLICATION
+	// node — it is implemented per top-level window. Query each window.
+	nwin := atspi_accessible_get_child_count(app, 0)
+	w := 0
+	while w < nwin {
+		win := atspi_accessible_get_child_at_index(app, w, 0)
+		if win != 0 {
+			arr := lu_matches(win, rule, maxnodes)
+			if arr != 0 {
+				ok = true
+				cnt := lu_arr_len(arr)
+				i = 0
+				while i < cnt {
+					node := lu_arr_get(arr, i)
+					if node != 0 {
+						role := noderole(node)
+						name := nodename(node)
+						if len(wantText) == 0 || contains(to_lower(name), to_lower(wantText)) {
+							x, y, wd, ht := extents(node)
+							if wd > 0 && ht > 0 {
+								// A match whose path cannot be rebuilt is still a
+								// real element: emit it with ref_ok:false rather
+								// than silently dropping it from the answer.
+								path, an, pok := pathof(node)
+								refok := pok && an == appname
+								out = append(out, nodejson(appname, node, path, role, name, refok))
+								n = n + 1
+							}
+						}
+					}
+					i = i + 1
+				}
+				lu_arr_free(arr)
+			}
+			g_object_unref(win)
+		}
+		w = w + 1
+	}
+	lu_rule_free(rule)
+	lu_roles_free(ra)
 }
 
 // ---------------------------------------------------------------- tree walk
@@ -347,11 +468,13 @@ var budget = 0
 var visited = 0
 var deepest = 0
 var depthCut = false
+var forceWalk = false
+var findMethod = "collection"
 var wantAll = false
 var wantRole = ""
 var wantText = ""
 
-func nodejson(appname, node, path, role, name) (r) {
+func nodejson(appname, node, path, role, name, refok) (r) {
 	x, y, w, h := extents(node)
 	nacts := 0
 	act0 := ""
@@ -364,7 +487,12 @@ func nodejson(appname, node, path, role, name) (r) {
 		g_object_unref(ai)
 	}
 	fields := []string{}
-	fields = append(fields, jkv("ref", jstr(mkref(appname, path, role, name))))
+	rf := ""
+	if refok {
+		rf = mkref(appname, path, role, name)
+	}
+	fields = append(fields, jkv("ref", jstr(rf)))
+	fields = append(fields, jkv("ref_ok", jbool(refok)))
 	fields = append(fields, jkv("role", jstr(role)))
 	fields = append(fields, jkv("name", jstr(name)))
 	fields = append(fields, jkv("x", str(x)))
@@ -416,7 +544,7 @@ func walk(appname, node, path, depth, maxdepth) {
 	if keep(role, name) && hasstate(node, ST_SHOWING) {
 		x, y, w, h := extents(node)
 		if w > 0 && h > 0 {
-			rows = append(rows, nodejson(appname, node, path, role, name))
+			rows = append(rows, nodejson(appname, node, path, role, name, true))
 		}
 	}
 	n := atspi_accessible_get_child_count(node, 0)
@@ -506,8 +634,22 @@ func cmd_state(appname, maxdepth, maxnodes) (out, code) {
 	visited = 0
 	deepest = 0
 	depthCut = false
+	method := "collection"
+	unknown := ""
 	t0 := now_ms()
-	walk(appname, app, "", 0, maxdepth)
+	cok := false
+	if !forceWalk {
+		crows, _, okc, unk := collect(appname, app, wantRole, maxnodes)
+		unknown = unk
+		cok = okc
+		if okc {
+			rows = crows
+		}
+	}
+	if !cok {
+		method = "walk"
+		walk(appname, app, "", 0, maxdepth)
+	}
 	ms := now_ms() - t0
 	g_object_unref(app)
 	trunc := budget <= 0
@@ -523,11 +665,15 @@ func cmd_state(appname, maxdepth, maxnodes) (out, code) {
 	f = append(f, jkv("depth_limit", str(maxdepth)))
 	f = append(f, jkv("depth_limited", jbool(depthCut)))
 	f = append(f, jkv("truncated", jbool(trunc)))
+	f = append(f, jkv("method", jstr(method)))
 	out = "{" + join(f, ",") + "}"
+	if len(unknown) > 0 {
+		write(2, "warning: unknown role '" + unknown + "' — it matched nothing; check: linux-use roles\n")
+	}
 	if trunc {
 		write(2, "warning: node budget exhausted — results are TRUNCATED; narrow with --role/--app or raise --max-nodes\n")
 	}
-	if depthCut {
+	if depthCut && method == "walk" {
 		write(2, "warning: subtrees were cut at --depth " + str(maxdepth) + " — deeper widgets are NOT in this result; raise --depth\n")
 	}
 }
@@ -535,6 +681,7 @@ func cmd_state(appname, maxdepth, maxnodes) (out, code) {
 func cmd_find(query, appfilter, maxdepth, maxnodes) (out, code) {
 	code = EX_OK
 	wantText = query
+	findMethod = "collection"
 	all := []string{}
 	visited = 0
 	deepest = 0
@@ -549,7 +696,18 @@ func cmd_find(query, appfilter, maxdepth, maxnodes) (out, code) {
 			if len(appfilter) == 0 || nm == appfilter {
 				rows = []string{}
 				budget = maxnodes
-				walk(nm, a, "", 0, maxdepth)
+				cok := false
+				if !forceWalk {
+					crows, _, okc, _ := collect(nm, a, wantRole, maxnodes)
+					cok = okc
+					if okc {
+						rows = crows
+					}
+				}
+				if !cok {
+					findMethod = "walk"
+					walk(nm, a, "", 0, maxdepth)
+				}
 				j := 0
 				while j < len(rows) {
 					all = append(all, rows[j])
@@ -571,8 +729,9 @@ func cmd_find(query, appfilter, maxdepth, maxnodes) (out, code) {
 	f = append(f, jkv("nodes_visited", str(visited)))
 	f = append(f, jkv("deepest", str(deepest)))
 	f = append(f, jkv("depth_limited", jbool(depthCut)))
+	f = append(f, jkv("method", jstr(findMethod)))
 	out = "{" + join(f, ",") + "}"
-	if depthCut {
+	if depthCut && findMethod == "walk" {
 		write(2, "warning: subtrees were cut at --depth " + str(maxdepth) + "; raise --depth if the target is missing\n")
 	}
 }
@@ -933,6 +1092,23 @@ func cmd_launch(command, waitfor, timeoutms) (out, code) {
 	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("command", jstr(command)) + "," + jkv("spawn_rc", str(rc)) + "," + jkv("appeared", jbool(appeared)) + "}"
 }
 
+// cmd_roles lists every role name the toolkit knows, flagging the ones in the
+// default interactive filter. --role takes these verbatim.
+func cmd_roles() (out, code) {
+	code = EX_OK
+	items := []string{}
+	n := lu_role_count()
+	i := 0
+	while i <= n {
+		nm := takestr(atspi_role_get_name(i))
+		if len(nm) > 0 {
+			items = append(items, "{" + jkv("role", jstr(nm)) + "," + jkv("interactive", jbool(interactive(nm))) + "}")
+		}
+		i = i + 1
+	}
+	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("roles", jarr(items)) + "," + jkv("count", str(len(items))) + "}"
+}
+
 func cmd_doctor() (out, code) {
 	code = EX_OK
 	f := []string{}
@@ -1007,6 +1183,7 @@ func cmd_pointer() (out, code) {
 // The AT-SPI callback is compiled to a raw C function pointer, so it must be
 // CAPTURELESS — every knob it reads is a package global.
 var wchApp = ""
+var wchRole = ""
 var wchSeen = 0
 var wchMax = 0
 
@@ -1015,21 +1192,44 @@ var wchMax = 0
 // indexof is atspi_accessible_get_index_in_parent with a fallback. Some nodes
 // report -1; silently DROPPING such a level builds a path that looks valid but
 // resolves to the wrong widget, so scan the parent's children instead.
+// sameobj tests accessible identity by POINTER only. atspi_accessible_get_id
+// was tried as a fallback and rejected: it is not unique per object here and
+// produced false matches, i.e. confidently WRONG refs. A ref we cannot prove
+// is better reported as unusable than guessed.
+func sameobj(a, b) (r) {
+	r = a == b
+}
+
 func indexof(node) (idx) {
-	idx = atspi_accessible_get_index_in_parent(node, 0)
-	if idx >= 0 {
-		return
-	}
+	idx = -1
 	par := atspi_accessible_get_parent(node, 0)
 	if par == 0 {
 		return
+	}
+	// index_in_parent is a HINT, not the truth: it can return a non-negative
+	// value that disagrees with get_child_at_index (observed in
+	// gnome-control-center, where it said 0 for a child actually at 1).
+	// Refs are resolved with get_child_at_index, so that is the authority —
+	// take the hint only when it verifies against it.
+	hint := atspi_accessible_get_index_in_parent(node, 0)
+	if hint >= 0 {
+		c := atspi_accessible_get_child_at_index(par, hint, 0)
+		if c != 0 {
+			same := sameobj(c, node)
+			g_object_unref(c)
+			if same {
+				idx = hint
+				g_object_unref(par)
+				return
+			}
+		}
 	}
 	n := atspi_accessible_get_child_count(par, 0)
 	i := 0
 	while i < n {
 		c := atspi_accessible_get_child_at_index(par, i, 0)
 		if c != 0 {
-			same := c == node
+			same := sameobj(c, node)
 			g_object_unref(c)
 			if same {
 				idx = i
@@ -1104,6 +1304,11 @@ func on_event(ev, data) {
 		if len(wchApp) > 0 && appname != wchApp {
 			emit = false
 		}
+		if emit && len(wchRole) > 0 {
+			if noderole(src) != wchRole {
+				emit = false
+			}
+		}
 		if emit {
 			role := noderole(src)
 			name := nodename(src)
@@ -1143,10 +1348,11 @@ func default_events() (r) {
 	r = append(r, "window:destroy")
 }
 
-func cmd_watch(appfilter, evspec, maxev, duration) (out, code) {
+func cmd_watch(appfilter, rolefilter, evspec, maxev, duration) (out, code) {
 	code = EX_OK
 	out = ""
 	wchApp = appfilter
+	wchRole = rolefilter
 	wchSeen = 0
 	wchMax = maxev
 
@@ -1217,6 +1423,10 @@ func guide_json() (r) {
 	g = append(g, jstr("state is filtered to interactive roles by default. Use --all for the full tree (labels, panels) when you need to READ the UI rather than act on it."))
 	g = append(g, jstr("'type' uses the editable-text interface when available (deterministic, no focus needed) and falls back to synthesized keystrokes. It REFUSES password fields unless --allow-password."))
 	g = append(g, jstr("'key' needs X11: it maps keysyms through the active keyboard layout via XTEST. On Wayland it will fail — use 'act' instead."))
+	g = append(g, jstr("state/find run a SERVER-SIDE collection query when you pass --role (measured ~9x faster on a large app: 5ms vs 47ms) and a recursive tree walk otherwise. The `method` field says which ran; force either with --collection / --walk."))
+	g = append(g, jstr("A collection result may contain elements with ref_ok:false — matched, on screen, but their path could not be proven, so no ref is given. They are still listed rather than dropped. Use --walk if you need a ref for every element."))
+	g = append(g, jstr("Valid --role names come from `linux-use roles` (130 of them, 18 interactive by default). An unrecognised role matches nothing and warns on stderr."))
+	g = append(g, jstr("watch takes --role too, which is the cheapest way to cut event noise: filtering to one role took a sample run from 54 events to the 6 that mattered."))
 	g = append(g, jstr("watch emits a ref plus ref_ok. ref_ok:false means the path could not be reconstructed reliably — use the app/role/name fields, do not fabricate a ref."))
 	g = append(g, jstr("For a label whose NAME IS ITS TEXT, the fingerprint changes whenever the text changes, so a ref captured from an event will report ref_stale on the next read. That is the mechanism working: the staleness IS the signal that the content changed. Re-run state, or drop the #fingerprint to address the path alone."))
 	g = append(g, jstr("OBSERVER EFFECT: reading the tree (state/find) can itself make toolkits emit accessibility events. If you run 'watch' while also polling 'state', expect self-induced noise — especially object:state-changed:*, which is why it is not in the default event set."))
@@ -1277,6 +1487,7 @@ func helpjson() (r) {
 	cmds = append(cmds, "{"+jkv("name", jstr("launch"))+","+jkv("args", jarr([]string{jstr("<command>"), jstr("--wait-for"), jstr("--timeout")}))+","+jkv("summary", jstr("spawn a program, optionally waiting for it to register"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("watch"))+","+jkv("args", jarr([]string{jstr("--app"), jstr("--events"), jstr("--max-events"), jstr("--duration")}))+","+jkv("summary", jstr("stream AT-SPI events as NDJSON — block on UI change instead of polling"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("pointer"))+","+jkv("args", jarr([]string{}))+","+jkv("summary", jstr("current pointer position"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("roles"))+","+jkv("args", jarr([]string{}))+","+jkv("summary", jstr("every valid --role name, with which are interactive by default"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("doctor"))+","+jkv("args", jarr([]string{}))+","+jkv("summary", jstr("environment health: session type, a11y bus, XTEST"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("serve"))+","+jkv("args", jarr([]string{jstr("--port")}))+","+jkv("summary", jstr("run the warm-registry HTTP daemon in the foreground"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("daemon"))+","+jkv("args", jarr([]string{jstr("start|stop|status"), jstr("--port")}))+","+jkv("summary", jstr("manage the background daemon"))+"}")
@@ -1447,6 +1658,8 @@ func run_cmd(argv) (out, code) {
 	fs = flag_int(fs, "timeout", "t", "8000", "timeout in ms")
 	fs = flag_str(fs, "wait-for", "w", "", "app name to wait for after launch")
 	fs = flag_bool(fs, "all", "", "include non-interactive nodes")
+	fs = flag_bool(fs, "walk", "", "force the recursive tree walk")
+	fs = flag_bool(fs, "collection", "", "force a server-side collection query")
 	fs = flag_bool(fs, "replace", "", "replace existing text instead of inserting")
 	fs = flag_bool(fs, "allow-password", "", "permit typing into a password field")
 	fs = flag_bool(fs, "human", "", "human-readable output (guide only)")
@@ -1454,6 +1667,19 @@ func run_cmd(argv) (out, code) {
 	pos := flag_args(fs)
 
 	wantAll = flag_on(fs, "all")
+	// Policy, from measurement: a collection query wins in proportion to how
+	// SELECTIVE it is (9x with a --role filter on a big app; a wash when asking
+	// for every interactive role, where per-match path reconstruction eats the
+	// gain and some matches come back unpathable). So: collection when a role
+	// filter narrows it, the walk otherwise. Either can be forced.
+	useCollection := len(flag_get(fs, "role")) > 0
+	if flag_on(fs, "collection") {
+		useCollection = true
+	}
+	if flag_on(fs, "walk") || flag_on(fs, "all") {
+		useCollection = false
+	}
+	forceWalk = !useCollection
 	wantRole = flag_get(fs, "role")
 	wantText = ""
 	depth := flag_int_val(fs, "depth")
@@ -1474,6 +1700,16 @@ func run_cmd(argv) (out, code) {
 	}
 	if cmd == "version" {
 		out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("tool", jstr("linux-use")) + "," + jkv("version", jstr(VERSION)) + "}"
+		return
+	}
+	if cmd == "roles" {
+		e2, c2 := need_a11y()
+		if c2 != EX_OK {
+			out = e2
+			code = c2
+			return
+		}
+		out, code = cmd_roles()
 		return
 	}
 	if cmd == "doctor" {
@@ -1536,7 +1772,7 @@ func run_cmd(argv) (out, code) {
 		return
 	}
 	if cmd == "watch" {
-		out, code = cmd_watch(flag_get(fs, "app"), flag_get(fs, "events"), flag_int_val(fs, "max-events"), flag_int_val(fs, "duration"))
+		out, code = cmd_watch(flag_get(fs, "app"), flag_get(fs, "role"), flag_get(fs, "events"), flag_int_val(fs, "max-events"), flag_int_val(fs, "duration"))
 		return
 	}
 	if cmd == "find" {
