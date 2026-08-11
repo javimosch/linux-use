@@ -48,6 +48,7 @@ extern "glib" {
 	cflags "-I/usr/include/glib-2.0 -I/usr/lib/x86_64-linux-gnu/glib-2.0/include"
 	link "gobject-2.0" link "glib-2.0"
 	header "glib-object.h"
+	fn g_object_ref(ptr) ptr
 	fn g_object_unref(ptr)
 	fn g_free(ptr)
 	fn g_timeout_add(u32, cb(ptr) bool, ptr) u32
@@ -73,6 +74,7 @@ extern "lu" {
 	fn lu_roles_free(ptr)
 	fn lu_role_count() i32
 	fn lu_rss_kb() i32
+	fn lu_role_name_of(ptr) string
 }
 
 extern "x11" {
@@ -119,7 +121,7 @@ var ST_VISIBLE = 30
 var COORD_SCREEN = 0
 var KEY_STRING = 4
 
-var VERSION = "0.5.0"
+var VERSION = "0.6.0"
 var SCHEMA = "linux-use/v1"
 
 // ---------------------------------------------------------------- json utils
@@ -223,6 +225,88 @@ func splitref(ref) (app, path, want) {
 	}
 	path = parts[len(parts)-1]
 	app = join(parts[0:len(parts)-1], ":")
+}
+
+// ---- geometry refs -------------------------------------------------------
+//
+// Some toolkits break parent/child reciprocity: a node's get_parent() returns
+// a container that does NOT list it among its children (observed in
+// gnome-control-center/libadwaita, where a `filler` reports a parent panel
+// with children=1 that does not contain it, and index_in_parent = -1). Such a
+// node is reachable top-down but has no provable child-index path, so a
+// path-shaped ref is impossible — not merely unknown.
+//
+// Those nodes get a GEOMETRY ref instead:
+//     app:@<roleId>~<x>,<y>,<w>,<h>#<fingerprint>
+// resolved by a collection query for that role, matched on exact extents and
+// verified by the same role+name fingerprint. Ambiguity (two widgets with the
+// same role at the same rectangle) is reported, never guessed.
+
+func geomref(app, roleid, x, y, w, h, role, name) (r) {
+	r = app + ":@" + str(roleid) + "~" + str(x) + "," + str(y) + "," + str(w) + "," + str(h) + "#" + fp(role, name)
+}
+
+func is_geom(path) (b) {
+	b = has_prefix(path, "@")
+}
+
+// resolve_geom finds the unique showing node of the given role at exactly the
+// given rectangle. Returns (node, count) — count != 1 means ambiguous/absent.
+func resolve_geom(app, spec) (node, found) {
+	node = 0
+	found = 0
+	body := substr(spec, 1, len(spec))
+	parts := split(body, "~")
+	if len(parts) < 2 {
+		return
+	}
+	roleid := parse_int(parts[0])
+	nums := split(parts[1], ",")
+	if len(nums) < 4 {
+		return
+	}
+	wx := parse_int(nums[0])
+	wy := parse_int(nums[1])
+	ww := parse_int(nums[2])
+	wh := parse_int(nums[3])
+
+	ra := lu_roles_new()
+	lu_roles_add(ra, roleid)
+	rule := lu_rule_new(ra, 1)
+	nwin := atspi_accessible_get_child_count(app, 0)
+	i := 0
+	while i < nwin {
+		win := atspi_accessible_get_child_at_index(app, i, 0)
+		if win != 0 {
+			arr := lu_matches(win, rule, 20000)
+			if arr != 0 {
+				cnt := lu_arr_len(arr)
+				j := 0
+				while j < cnt {
+					c := lu_arr_get(arr, j)
+					if c != 0 {
+						x, y, w, h := extents(c)
+						if x == wx && y == wy && w == ww && h == wh {
+							found = found + 1
+							if found == 1 {
+								node = g_object_ref(c)
+							}
+						}
+					}
+					j = j + 1
+				}
+				lu_arr_free(arr)
+			}
+			g_object_unref(win)
+		}
+		i = i + 1
+	}
+	lu_rule_free(rule)
+	lu_roles_free(ra)
+	if found != 1 && node != 0 {
+		g_object_unref(node)
+		node = 0
+	}
 }
 
 // ---------------------------------------------------------------- atspi core
@@ -398,6 +482,7 @@ func collect(appname, app, rolefilter, maxnodes) (out, n, ok, unknown, unpathed)
 	ok = false
 	unknown = ""
 	unpathed = 0
+	geomrefs = 0
 	cacheOn = true
 	pcache_reset()
 	names := interactive_roles()
@@ -450,18 +535,23 @@ func collect(appname, app, rolefilter, maxnodes) (out, n, ok, unknown, unpathed)
 								path, an, pok := pathof(node)
 								refok := pok && an == appname
 								if !refok {
-									unpathed = unpathed + 1
-									if !forceCollection {
-										// The caller wants complete refs, so this
-										// result is already doomed to be redone as
-										// a walk. Stop now instead of paying for
-										// the rest of the matches.
-										i = cnt
-										w = nwin
+									// No provable path (broken parent/child
+									// reciprocity). Addressable by geometry
+									// instead of unusable.
+									rid := lu_role_from_name(role)
+									if rid >= 0 && wd > 0 && ht > 0 {
+										geomrefs = geomrefs + 1
+										out = append(out, nodegeomjson(appname, node, rid, x, y, wd, ht, role, name))
+										n = n + 1
+									} else {
+										unpathed = unpathed + 1
+										out = append(out, nodejson(appname, node, path, role, name, false))
+										n = n + 1
 									}
+								} else {
+									out = append(out, nodejson(appname, node, path, role, name, true))
+									n = n + 1
 								}
-								out = append(out, nodejson(appname, node, path, role, name, refok))
-								n = n + 1
 							}
 						}
 					}
@@ -486,6 +576,7 @@ var deepest = 0
 var depthCut = false
 var forceWalk = false
 var forceCollection = false
+var geomrefs = 0
 var findMethod = "collection"
 var wantAll = false
 var wantRole = ""
@@ -510,6 +601,7 @@ func nodejson(appname, node, path, role, name, refok) (r) {
 	}
 	fields = append(fields, jkv("ref", jstr(rf)))
 	fields = append(fields, jkv("ref_ok", jbool(refok)))
+	fields = append(fields, jkv("ref_kind", jstr("path")))
 	fields = append(fields, jkv("role", jstr(role)))
 	fields = append(fields, jkv("name", jstr(name)))
 	fields = append(fields, jkv("x", str(x)))
@@ -524,6 +616,37 @@ func nodejson(appname, node, path, role, name, refok) (r) {
 	fields = append(fields, jkv("focused", jbool(hasstate(node, ST_FOCUSED))))
 	fields = append(fields, jkv("editable", jbool(hasstate(node, ST_EDITABLE))))
 	r = "{" + join(fields, ",") + "}"
+}
+
+func nodegeomjson(appname, node, roleid, x, y, w, h, role, name) (r) {
+	nacts := 0
+	act0 := ""
+	ai := atspi_accessible_get_action_iface(node)
+	if ai != 0 {
+		nacts = atspi_action_get_n_actions(ai, 0)
+		if nacts > 0 {
+			act0 = takestr(atspi_action_get_action_name(ai, 0, 0))
+		}
+		g_object_unref(ai)
+	}
+	f := []string{}
+	f = append(f, jkv("ref", jstr(geomref(appname, roleid, x, y, w, h, role, name))))
+	f = append(f, jkv("ref_ok", "true"))
+	f = append(f, jkv("ref_kind", jstr("geometry")))
+	f = append(f, jkv("role", jstr(role)))
+	f = append(f, jkv("name", jstr(name)))
+	f = append(f, jkv("x", str(x)))
+	f = append(f, jkv("y", str(y)))
+	f = append(f, jkv("w", str(w)))
+	f = append(f, jkv("h", str(h)))
+	f = append(f, jkv("cx", str(x+w/2)))
+	f = append(f, jkv("cy", str(y+h/2)))
+	f = append(f, jkv("actions", str(nacts)))
+	f = append(f, jkv("action", jstr(act0)))
+	f = append(f, jkv("enabled", jbool(hasstate(node, ST_ENABLED))))
+	f = append(f, jkv("focused", jbool(hasstate(node, ST_FOCUSED))))
+	f = append(f, jkv("editable", jbool(hasstate(node, ST_EDITABLE))))
+	r = "{" + join(f, ",") + "}"
 }
 
 func keep(role, name) (b) {
@@ -653,14 +776,17 @@ func cmd_state(appname, maxdepth, maxnodes) (out, code) {
 	depthCut = false
 	method := "collection"
 	unknown := ""
+	geomCount := 0
 	t0 := now_ms()
 	cok := false
 	if !forceWalk {
 		crows, _, okc, unk, unp := collect(appname, app, wantRole, maxnodes)
 		unknown = unk
 		cok = okc
+		geomUsed := geomrefs
 		if okc {
 			rows = crows
+			geomCount = geomUsed
 			// A collection match whose path could not be proven has no ref.
 			// Unless the caller explicitly asked for the collection path,
 			// prefer a complete answer over a fast one and re-run as a walk.
@@ -693,6 +819,7 @@ func cmd_state(appname, maxdepth, maxnodes) (out, code) {
 	f = append(f, jkv("depth_limited", jbool(depthCut)))
 	f = append(f, jkv("truncated", jbool(trunc)))
 	f = append(f, jkv("method", jstr(method)))
+	f = append(f, jkv("geometry_refs", str(geomCount)))
 	out = "{" + join(f, ",") + "}"
 	if len(unknown) > 0 {
 		write(2, "warning: unknown role '" + unknown + "' — it matched nothing; check: linux-use roles\n")
@@ -786,12 +913,28 @@ func getnode(ref) (node, out, code) {
 		out = errjson("app_not_found", "no application named '"+appname+"'", true, []string{"run: linux-use apps"})
 		return
 	}
-	node = resolve(app, path)
-	g_object_unref(app)
-	if node == 0 {
-		code = EX_REF_NOT_FOUND
-		out = errjson("ref_not_found", "path '"+path+"' does not exist in "+appname, true, []string{"the UI changed; re-run: linux-use state --app " + appname})
-		return
+	if is_geom(path) {
+		n2, cnt := resolve_geom(app, path)
+		g_object_unref(app)
+		node = n2
+		if cnt == 0 {
+			code = EX_REF_NOT_FOUND
+			out = errjson("ref_not_found", "no widget of that role at that rectangle in "+appname, true, []string{"the UI moved or closed; re-run: linux-use state --app " + appname})
+			return
+		}
+		if cnt > 1 {
+			code = EX_REF_STALE
+			out = errjson("ref_ambiguous", str(cnt)+" widgets share that role and rectangle in "+appname, true, []string{"the layout changed; re-run: linux-use state --app " + appname})
+			return
+		}
+	} else {
+		node = resolve(app, path)
+		g_object_unref(app)
+		if node == 0 {
+			code = EX_REF_NOT_FOUND
+			out = errjson("ref_not_found", "path '"+path+"' does not exist in "+appname, true, []string{"the UI changed; re-run: linux-use state --app " + appname})
+			return
+		}
 	}
 	if len(want) > 0 {
 		got := fp(noderole(node), nodename(node))
@@ -1542,6 +1685,8 @@ func guide_json() (r) {
 	m := []string{}
 	m = append(m, jstr("Every GUI app publishes a tree of widgets over AT-SPI2. linux-use reads that tree and acts on it. You do NOT need screenshots or pixel coordinates for most work."))
 	m = append(m, jstr("An element ref looks like 'gnome-calculator:/0/1/0/3#824713' — application name, child-index path, and a fingerprint of role+name. Pass refs back verbatim; never construct or edit one by hand."))
+	m = append(m, jstr("A ref comes in two kinds, and ref_kind says which. A PATH ref (app:/0/1/2#fp) addresses a node by child indices. A GEOMETRY ref (app:@<roleId>~x,y,w,h#fp) addresses it by role and on-screen rectangle, and is issued when a node has no provable path — some toolkits report a parent that does not list the node among its children, so climbing to it is impossible, not merely unknown. Both are used identically: pass them back verbatim."))
+	m = append(m, jstr("A geometry ref is tied to screen position, so moving or resizing the window invalidates it — you get exit 84, never a silent hit on the wrong widget. If two widgets share a role and rectangle the ref is refused as ambiguous rather than guessed."))
 	m = append(m, jstr("Refs go stale when the UI changes. That is DETECTED, not silently ignored: you get exit 83 ref_stale. The fix is always to re-run 'state' and use fresh refs."))
 	m = append(m, jstr("Prefer 'act' over 'click'. 'act' invokes the widget's own accessible action — it needs no focus, no pointer, and works even when the window is fully occluded by another window. 'click' synthesizes a real pointer event and is the fallback for widgets that expose no action."))
 	c = append(c, jkv("mental_model", jarr(m)))

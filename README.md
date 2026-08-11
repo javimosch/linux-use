@@ -6,14 +6,14 @@
 
 Agent-first, CLI-first GUI control for Linux desktops — the Linux answer to
 [Windows-Use](https://github.com/Jeomon/Windows-Use), built in
-[machin (MFL)](https://github.com/javimosch/machin) as a single 154 KB binary
+[machin (MFL)](https://github.com/javimosch/machin) as a single 162 KB binary
 with no runtime dependencies.
 
 📖 **[Docs & changelog](https://javimosch.github.io/linux-use/)** ·
 📦 **[Releases](https://github.com/javimosch/linux-use/releases)** ·
 ✨ **[awesome-machin](https://github.com/javimosch/awesome-machin)**
 
-**v0.5.0** — perception (memoized collection queries + walk fallback), actuation, a
+**v0.6.0** — perception (memoized collection queries + walk fallback), actuation, a
 filterable event stream, and a warm-registry daemon, aligned to [cli-specs.intrane.fr](https://cli-specs.intrane.fr/).
 
 ## The design bet
@@ -45,10 +45,15 @@ linux-use act 'gnome-calculator:/0/1/0/1/0/0/1/0/22#18124260'
 linux-use read <ref>                        # verify the effect
 ```
 
-An element ref is `app : child-path # fingerprint(role+name)`. Pass refs back
-verbatim. When the UI changes underneath one, the fingerprint mismatches and
-you get **exit 83 `ref_stale`** with a suggestion to re-run `state` — the tool
-never silently acts on the wrong widget.
+An element ref comes in two kinds, and `ref_kind` says which:
+
+- **path** — `app:/0/1/0/22#18124260` — addressed by child indices.
+- **geometry** — `app:@43~150,352,64,44#18124261` — addressed by role and
+  on-screen rectangle, issued when a node has no provable path (see below).
+
+Pass refs back verbatim. When the UI changes underneath one, the fingerprint
+mismatches and you get **exit 83 `ref_stale`** with a suggestion to re-run
+`state` — the tool never silently acts on the wrong widget.
 
 ### act vs click
 
@@ -111,6 +116,43 @@ Two behaviours worth knowing:
   reports `ref_stale` on the next read — correctly: the staleness *is* the
   signal that the content changed. Drop the `#fingerprint` to address the path
   alone, or re-run `state`.
+
+## Geometry refs: when a widget has no provable path
+
+v0.5 fell back to a full tree walk whenever a collection match could not be
+pathed (14 of 37 elements in gnome-control-center). Diagnosing it turned up
+something more interesting than an identity bug — **broken parent/child
+reciprocity**:
+
+```
+NODE   filler '' [472,112 578x100]
+parent panel  '' [472,112 578x100]  children=1  index_in_parent=-1
+  -> pointer match: -1 | role+name+extents match: -1
+```
+
+The node's `get_parent()` returns a container that does **not** list it among
+its children, by any comparison. Such a node is reachable top-down but has no
+child-index path at all — impossible, not merely unknown. No identity test
+could ever have fixed it.
+
+So those nodes get a **geometry ref** instead: `app:@<roleId>~x,y,w,h#<fp>`,
+resolved with a collection query for that role, matched on exact extents and
+verified by the same role+name fingerprint. Two widgets sharing a role and
+rectangle are reported ambiguous; a rectangle with no match returns exit 84.
+A geometry ref never silently resolves to the wrong widget — but it *is* tied
+to screen position, so moving or resizing the window invalidates it.
+
+The `collection+walk` fallback is gone. Every match is addressable:
+
+| app | method | default | `--walk` | geometry refs |
+|---|---|---|---|---|
+| gnome-calculator | collection | **15 ms** | 65 ms | 0 |
+| gnome-text-editor | collection | **12 ms** | 53 ms | 0 |
+| gnome-control-center | collection | **25 ms** | 44 ms | 14 |
+
+All three return the same element set as the walk with every ref usable.
+All 14 geometry refs in gnome-control-center resolve to the widget they
+describe; `act` through one drives the app correctly.
 
 ## Collection queries: measured, not assumed
 
@@ -319,12 +361,10 @@ These cost real debugging time and are the non-obvious part of this codebase.
   with a no-op callback; see above). Bound long-lived listeners with
   `--max-rss` and restart on exit 90.
 
-## Next (v0.6)
+## Next (v0.7)
 
-1. Path the matches that gnome-control-center cannot resolve, so the
-   `collection+walk` fallback becomes unnecessary.
-2. Consecutive-event dedupe in `watch`.
-3. Injector backend abstraction (`xtest | uinput | libei | portal`) so Wayland
+1. Consecutive-event dedupe in `watch`.
+2. Injector backend abstraction (`xtest | uinput | libei | portal`) so Wayland
    becomes a backend rather than a rewrite.
 4. The remaining three specs: update, feedback, telemetry.
 5. Screenshots + a vision fallback for the apps that expose no tree.

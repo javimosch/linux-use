@@ -30,7 +30,7 @@
             </div>
             <div>
               <h3 class="text-xl font-semibold text-white mb-2">Stale references are detected, never guessed</h3>
-              <p class="text-white/40 leading-relaxed">Every element reference carries a fingerprint of its role and name. When the UI changes underneath one, you get exit code 83 and a suggestion to re-read the screen — instead of an action silently landing on the wrong widget. Elements whose identity cannot be proven are reported as unusable rather than emitted as a plausible guess.</p>
+              <p class="text-white/40 leading-relaxed">References come in two kinds — by position in the widget tree, or by role and on-screen rectangle for widgets whose tree position cannot be proven. Every reference carries a fingerprint of its role and name. When the UI changes underneath one, you get exit code 83 and a suggestion to re-read the screen — instead of an action silently landing on the wrong widget. Elements whose identity cannot be proven are reported as unusable rather than emitted as a plausible guess.</p>
             </div>
           </div>
         </div>
