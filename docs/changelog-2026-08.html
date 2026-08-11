@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Changelog August 2026 - linux-use</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <style>
+      body { font-family: 'Geist', system-ui, sans-serif; background-color: #050505; color: #e2e8f0; }
+      h1, h2, h3 { font-family: 'Geist', system-ui, sans-serif; }
+      .tab-btn { transition: all 0.2s ease; }
+      .tab-btn.active { background-color: #1a1a1d; border-color: #3b82f6; color: #fff; }
+      .tab-content { display: none; animation: fadeIn 0.3s ease; }
+      .tab-content.active { display: block; }
+      @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+      .feature-card { background: linear-gradient(135deg, #1a1a1d 0%, #151517 100%); border: 1px solid #262629; transition: all 0.3s ease; }
+      .feature-card:hover { border-color: #3b82f6; transform: translateY(-2px); }
+    </style>
+  </head>
+  <body class="bg-[#0a0a0b] min-h-screen">
+    <div class="max-w-5xl mx-auto px-6 py-24">
+      <header class="mb-16">
+        <a href="changelog.html" class="inline-flex items-center gap-1 text-sm text-white/30 hover:text-white/70 text-sm mb-6 inline-block transition-colors"><span class="text-xs">&larr; Back tolarr;</span> Back to Changelog <span class="text-[10px]">→</span></a>
+        <h1 class="text-5xl font-bold text-white mt-4 tracking-tight">Changelog</h1>
+        <p class="text-white/40 mt-3 text-lg">August 2026</p>
+        
+        <!-- Tabs -->
+        <div class="flex gap-2 mt-8">
+          <button onclick="switchTab('product')" id="tab-product" class="tab-btn active px-5 py-2.5 rounded-lg border border-slate-700 text-slate-300 font-medium text-sm hover:border-slate-600">
+            Product
+          </button>
+          <button onclick="switchTab('technical')" id="tab-technical" class="tab-btn px-5 py-2.5 rounded-lg border border-slate-700 text-slate-300 font-medium text-sm hover:border-slate-600">
+            Technical
+          </button>
+        </div>
+      </header>
+
+      <!-- Product Changelog -->
+      <div id="content-product" class="tab-content active">
+
+        <div class="feature-card rounded-xl p-6">
+          <div class="flex items-start gap-4">
+            <div class="w-12 h-12 rounded-lg bg-blue-500/10 flex items-center justify-center flex-shrink-0">
+              <span class="text-2xl">🖱️</span>
+            </div>
+            <div>
+              <h3 class="text-xl font-semibold text-white mb-2">Control a Linux desktop from an agent</h3>
+              <p class="text-white/40 leading-relaxed">linux-use reads the AT-SPI2 accessibility tree and acts on it: list apps and windows, enumerate interactive elements, click, type, send key combos, and read text back. No screenshots, no pixel coordinates, no LLM inside — your agent is the loop. One 154 KB static binary with no runtime dependencies.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="feature-card rounded-xl p-6">
+          <div class="flex items-start gap-4">
+            <div class="w-12 h-12 rounded-lg bg-emerald-500/10 flex items-center justify-center flex-shrink-0">
+              <span class="text-2xl">🎯</span>
+            </div>
+            <div>
+              <h3 class="text-xl font-semibold text-white mb-2">Act on widgets, not pixels</h3>
+              <p class="text-white/40 leading-relaxed">The <code>act</code> command invokes a widget's own accessible action — no focus stealing, no pointer movement, and it works even when the window is completely hidden behind another window. Synthetic XTEST clicking is there as a fallback for widgets that expose no action.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="feature-card rounded-xl p-6">
+          <div class="flex items-start gap-4">
+            <div class="w-12 h-12 rounded-lg bg-amber-500/10 flex items-center justify-center flex-shrink-0">
+              <span class="text-2xl">🔒</span>
+            </div>
+            <div>
+              <h3 class="text-xl font-semibold text-white mb-2">Stale references are detected, never guessed</h3>
+              <p class="text-white/40 leading-relaxed">Every element reference carries a fingerprint of its role and name. When the UI changes underneath one, you get exit code 83 and a suggestion to re-read the screen — instead of an action silently landing on the wrong widget. Elements whose identity cannot be proven are reported as unusable rather than emitted as a plausible guess.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="feature-card rounded-xl p-6">
+          <div class="flex items-start gap-4">
+            <div class="w-12 h-12 rounded-lg bg-purple-500/10 flex items-center justify-center flex-shrink-0">
+              <span class="text-2xl">📡</span>
+            </div>
+            <div>
+              <h3 class="text-xl font-semibold text-white mb-2">Wait for the UI instead of polling it</h3>
+              <p class="text-white/40 leading-relaxed">The <code>watch</code> command streams real AT-SPI events as newline-delimited JSON, one line per event, with a resolved element reference. Filter by app, by role, or by event type; stop after exactly N events or after a time limit. Filtering to a single role took one sample run from 54 events down to the 6 that mattered.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="feature-card rounded-xl p-6">
+          <div class="flex items-start gap-4">
+            <div class="w-12 h-12 rounded-lg bg-cyan-500/10 flex items-center justify-center flex-shrink-0">
+              <span class="text-2xl">⚡</span>
+            </div>
+            <div>
+              <h3 class="text-xl font-semibold text-white mb-2">Server-side queries when they actually help</h3>
+              <p class="text-white/40 leading-relaxed">Asking for a specific role runs an AT-SPI collection query that matches server-side in one round trip — measured at 5 ms versus 47 ms on a large app. Asking for everything still uses a tree walk, because that turned out to be a wash. The tool picks based on the measurement and tells you which path it took.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="feature-card rounded-xl p-6">
+          <div class="flex items-start gap-4">
+            <div class="w-12 h-12 rounded-lg bg-rose-500/10 flex items-center justify-center flex-shrink-0">
+              <span class="text-2xl">🔊</span>
+            </div>
+            <div>
+              <h3 class="text-xl font-semibold text-white mb-2">Incomplete answers are loud, not silent</h3>
+              <p class="text-white/40 leading-relaxed">A tree read that was cut short by a depth or node limit says so — in the JSON and on stderr. This came from a real bug: the old default depth silently returned zero text fields for a text editor, which would lead an agent to conclude the editor had none.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="feature-card rounded-xl p-6">
+          <div class="flex items-start gap-4">
+            <div class="w-12 h-12 rounded-lg bg-indigo-500/10 flex items-center justify-center flex-shrink-0">
+              <span class="text-2xl">🤖</span>
+            </div>
+            <div>
+              <h3 class="text-xl font-semibold text-white mb-2">Built to the agent-first CLI specs</h3>
+              <p class="text-white/40 leading-relaxed">JSON on stdout, context on stderr, semantic exit codes, and typed errors that carry <code>recoverable</code> plus concrete <code>suggestions</code>. <code>guide</code> ships the whole operator manual inside the binary, and a warm-registry daemon keeps repeated calls fast. Follows the specs at cli-specs.intrane.fr.</p>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Technical Changelog -->
+      <div id="content-technical" class="tab-content">
+        <div class="space-y-8">
+
+        <section>
+          <h2 class="text-2xl font-semibold text-purple-400 mb-4 flex items-center gap-2">
+            <span>💼</span> Other
+          </h2>
+          <ul class="space-y-2 text-slate-300">
+            <li><span class="text-slate-500 text-sm mr-3">[11/08]</span>v0.3: server-side collection queries + watch --role</li>
+            <li><span class="text-slate-500 text-sm mr-3">[11/08]</span>v0.2: depth instrumentation + AT-SPI watch event stream</li>
+          </ul>
+        </section>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      function switchTab(tab) {
+        document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+        document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+        document.getElementById('content-' + tab).classList.add('active');
+        document.getElementById('tab-' + tab).classList.add('active');
+      }
+    </script>
+  </body>
+</html>

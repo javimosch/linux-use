@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>linux-use — agent-first GUI control for Linux</title>
+<meta name="description" content="Agent-first, CLI-first GUI control for Linux desktops via the AT-SPI2 accessibility tree. A single static binary built with machin (MFL). The Linux answer to Windows-Use.">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: 'Geist', system-ui, sans-serif; }
+  code, pre { font-family: 'Geist Mono', ui-monospace, monospace; }
+  .card { background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.01)); border: 1px solid rgba(255,255,255,.07); }
+  .card:hover { border-color: rgba(59,130,246,.35); }
+</style>
+</head>
+<body class="bg-[#08080a] text-slate-100 antialiased">
+
+<div class="max-w-5xl mx-auto px-6 py-16">
+
+  <header class="mb-14">
+    <div class="flex items-center gap-3 mb-5 flex-wrap">
+      <span class="text-xs font-medium px-2.5 py-1 rounded-full bg-blue-500/10 text-blue-300 border border-blue-500/20">v0.3.0</span>
+      <span class="text-xs font-medium px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">154 KB static binary</span>
+      <span class="text-xs font-medium px-2.5 py-1 rounded-full bg-white/5 text-slate-400 border border-white/10">MIT</span>
+    </div>
+    <h1 class="text-5xl sm:text-6xl font-bold text-white tracking-tight">linux-use</h1>
+    <p class="text-slate-400 mt-4 text-lg max-w-3xl leading-relaxed">
+      Agent-first, CLI-first GUI control for Linux desktops — the Linux answer to
+      <a href="https://github.com/Jeomon/Windows-Use" class="text-slate-300 underline decoration-white/20 hover:decoration-blue-400">Windows-Use</a>.
+      It reads the AT-SPI2 accessibility tree and acts on it, so an agent drives real
+      applications without screenshots or pixel coordinates.
+    </p>
+    <p class="text-slate-500 mt-4 max-w-3xl leading-relaxed">
+      It ships <strong class="text-slate-300">zero LLM code</strong>. Windows-Use is a Python library with the model
+      inside it; linux-use inverts that — it is a pure sensor/actuator binary, and your agent is the loop.
+    </p>
+    <nav class="mt-8 flex flex-wrap gap-3">
+      <a href="https://github.com/javimosch/linux-use" class="inline-block px-5 py-2.5 rounded-lg bg-white text-black font-medium text-sm hover:bg-slate-200 transition-all">GitHub</a>
+      <a href="https://github.com/javimosch/linux-use/releases/latest" class="inline-block px-5 py-2.5 rounded-lg border border-white/15 text-slate-300 font-medium text-sm hover:border-blue-500 hover:text-blue-400 transition-all">Download binary</a>
+      <a href="changelog.html" class="inline-block px-5 py-2.5 rounded-lg border border-white/15 text-slate-300 font-medium text-sm hover:border-blue-500 hover:text-blue-400 transition-all">Changelog</a>
+    </nav>
+  </header>
+
+  <section class="mb-14">
+    <h2 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-4">The loop</h2>
+    <pre class="card rounded-xl p-5 text-sm text-slate-300 overflow-x-auto leading-relaxed"><span class="text-slate-600"># what is running and exposes accessibility</span>
+$ linux-use apps
+
+<span class="text-slate-600"># interactive elements, each with a ref</span>
+$ linux-use state --app gnome-calculator
+{"count":28,"walk_ms":48,"method":"walk","elements":[
+  {"ref":"gnome-calculator:/0/1/0/1/0/0/1/0/22#18124260",
+   "role":"push button","name":"7","cx":114,"cy":376,"action":"click"}, ...]}
+
+<span class="text-slate-600"># act on the widget itself — no pointer, no focus, works occluded</span>
+$ linux-use act 'gnome-calculator:/0/1/0/1/0/0/1/0/22#18124260'
+
+<span class="text-slate-600"># wait for the UI to change instead of polling it</span>
+$ linux-use watch --app gnome-calculator --role editbar --duration 5000</pre>
+  </section>
+
+  <section class="mb-14">
+    <h2 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-4">What makes it different</h2>
+    <div class="grid sm:grid-cols-2 gap-4">
+      <div class="card rounded-xl p-5">
+        <h3 class="font-semibold text-white mb-1.5">Acts on widgets, not pixels</h3>
+        <p class="text-slate-400 text-sm leading-relaxed">Invokes a widget's own accessible action — no focus stealing, no pointer movement, and it works while the window is fully hidden behind another one.</p>
+      </div>
+      <div class="card rounded-xl p-5">
+        <h3 class="font-semibold text-white mb-1.5">Wrong answers are refused</h3>
+        <p class="text-slate-400 text-sm leading-relaxed">Refs carry a fingerprint. A stale one exits 83 with a fix suggestion; an element whose identity can't be proven is reported unusable rather than guessed.</p>
+      </div>
+      <div class="card rounded-xl p-5">
+        <h3 class="font-semibold text-white mb-1.5">Events, not polling</h3>
+        <p class="text-slate-400 text-sm leading-relaxed">Real AT-SPI callbacks streamed as NDJSON, filterable by app, role and event type — with exact stop conditions so an agent can block on a change.</p>
+      </div>
+      <div class="card rounded-xl p-5">
+        <h3 class="font-semibold text-white mb-1.5">Incomplete answers are loud</h3>
+        <p class="text-slate-400 text-sm leading-relaxed">A truncated or depth-limited read says so, in the JSON and on stderr — because "0 elements" silently meaning "I didn't look" is how agents get misled.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="mb-14">
+    <h2 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-4">Install</h2>
+    <pre class="card rounded-xl p-5 text-sm text-slate-300 overflow-x-auto leading-relaxed">sudo apt install libatspi2.0-dev libxtst-dev libx11-dev libglib2.0-dev
+gsettings set org.gnome.desktop.interface toolkit-accessibility true
+./build.sh          <span class="text-slate-600"># or grab the binary from Releases</span>
+linux-use doctor    <span class="text-slate-600"># tells you what's missing</span></pre>
+    <p class="text-slate-500 text-sm mt-3">X11 today. On Wayland the accessibility paths still work; synthetic input does not.</p>
+  </section>
+
+  <section class="mb-14">
+    <h2 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-4">Built with machin</h2>
+    <div class="card rounded-xl p-6">
+      <p class="text-slate-400 leading-relaxed">
+        linux-use is written in <a href="https://github.com/javimosch/machin" class="text-blue-400 hover:text-blue-300 font-medium">machin (MFL)</a> —
+        the Machine-First Language: terse enough for an agent to write, compiled through C to a single tiny
+        native binary with HTTP, SQLite and crypto built in. No runtime, no dependencies.
+      </p>
+      <p class="text-slate-400 leading-relaxed mt-3">
+        The whole tool is one source file plus a small C shim for the AT-SPI FFI boundary. See
+        <a href="https://github.com/javimosch/awesome-machin" class="text-blue-400 hover:text-blue-300 font-medium">awesome-machin</a>
+        for other things built with it.
+      </p>
+      <p class="text-slate-400 leading-relaxed mt-3">
+        It follows the agent-first CLI conventions at
+        <a href="https://cli-specs.intrane.fr/" class="text-blue-400 hover:text-blue-300 font-medium">cli-specs.intrane.fr</a>:
+        JSON on stdout, context on stderr, semantic exit codes, typed errors with suggestions, an embedded
+        <code class="text-slate-300">guide</code>, and a daemon lifecycle.
+      </p>
+    </div>
+  </section>
+
+  <footer class="pt-8 border-t border-white/10 text-sm text-slate-500">
+    <p>
+      MIT licensed. Built by
+      <a href="https://www.linkedin.com/in/arancibiajav/" class="text-slate-300 hover:text-blue-400">Javier Arancibia</a>
+      · <a href="https://intrane.fr" class="text-slate-300 hover:text-blue-400">intrane.fr</a>
+      · <a href="https://github.com/javimosch/linux-use" class="text-slate-300 hover:text-blue-400">source</a>
+    </p>
+  </footer>
+
+</div>
+</body>
+</html>

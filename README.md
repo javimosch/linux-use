@@ -1,9 +1,17 @@
-# machin-linux-use
+# linux-use
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![built with machin](https://img.shields.io/badge/built%20with-machin%20(MFL)-6366f1)](https://github.com/javimosch/machin)
+[![agent-first CLI](https://img.shields.io/badge/agent--first-cli--specs-10b981)](https://cli-specs.intrane.fr/)
 
 Agent-first, CLI-first GUI control for Linux desktops — the Linux answer to
 [Windows-Use](https://github.com/Jeomon/Windows-Use), built in
 [machin (MFL)](https://github.com/javimosch/machin) as a single 154 KB binary
 with no runtime dependencies.
+
+📖 **[Docs & changelog](https://javimosch.github.io/linux-use/)** ·
+📦 **[Releases](https://github.com/javimosch/linux-use/releases)** ·
+✨ **[awesome-machin](https://github.com/javimosch/awesome-machin)**
 
 **v0.3.0** — perception (walk + server-side collection queries), actuation, a
 filterable event stream, and a warm-registry daemon, aligned to [cli-specs.intrane.fr](https://cli-specs.intrane.fr/).
@@ -287,3 +295,18 @@ build.sh          machin encode (machweb + flags + app) -> machin build
 test/env.sh       isolated Xvfb + D-Bus + XDG_RUNTIME_DIR test desktop
 spike/            the original feasibility spike, kept for reference
 ```
+
+## Built with
+
+- **[machin (MFL)](https://github.com/javimosch/machin)** — the Machine-First Language this is written in.
+  One source file plus a small C shim, compiled through C to a static binary.
+- **[awesome-machin](https://github.com/javimosch/awesome-machin)** — other things built with machin.
+- **[cli-specs.intrane.fr](https://cli-specs.intrane.fr/)** — the agent-first CLI spec family this follows.
+
+## Author
+
+Built by [Javier Arancibia](https://www.linkedin.com/in/arancibiajav/) · [intrane.fr](https://intrane.fr)
+
+## License
+
+MIT — see [LICENSE](LICENSE).
