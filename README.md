@@ -13,7 +13,7 @@ with no runtime dependencies.
 📦 **[Releases](https://github.com/javimosch/linux-use/releases)** ·
 ✨ **[awesome-machin](https://github.com/javimosch/awesome-machin)**
 
-**v0.3.0** — perception (walk + server-side collection queries), actuation, a
+**v0.4.0** — perception (memoized collection queries + walk fallback), actuation, a
 filterable event stream, and a warm-registry daemon, aligned to [cli-specs.intrane.fr](https://cli-specs.intrane.fr/).
 
 ## The design bet
@@ -113,31 +113,33 @@ Two behaviours worth knowing:
 
 ## Collection queries: measured, not assumed
 
-`state`/`find` can either walk the tree or ask AT-SPI's **Collection** interface
-to match server-side in one round trip. The win scales with *selectivity*:
+`state`/`find` ask AT-SPI's **Collection** interface to match server-side in one
+round trip, and fall back to a tree walk when a match's ref cannot be proven.
 
-| case | collection | walk |
-|---|---|---|
-| gnome-calculator, all interactive roles | **48 ms** | 81 ms |
-| gnome-control-center, all interactive roles | 52 ms | 51 ms |
-| gnome-control-center, `--role "push button"` (3 of 307 nodes) | **5 ms** | 47 ms |
+v0.4 memoizes the climb from a match back to the application root — collection
+matches are siblings sharing ancestors, so without it the same chain was
+re-walked once per match and ate the entire benefit. Measured across six apps:
 
-A narrow query is ~9x faster; asking for *everything* interactive is a wash,
-because a collection match arrives as a bare node and its ref has to be
-rebuilt by walking back up — which costs what the query saved.
+| app | default | method | `--walk` |
+|---|---|---|---|
+| gnome-text-editor | **12 ms** | collection | 71 ms |
+| gnome-calculator | **23 ms** | collection | 97 ms |
+| gnome-disks | **5 ms** | collection | 15 ms |
+| seahorse | **15 ms** | collection | 29 ms |
+| Nautilus | **560 ms** | collection | 625 ms |
+| gnome-control-center | 76 ms | collection+walk | 69 ms |
+| gnome-control-center `--role "push button"` | **4 ms** | collection | 47 ms |
 
-So the default is **collection when `--role` narrows it, walk otherwise**.
-`--collection` / `--walk` force either; `method` in the output says which ran.
+Five of six apps are 1.1–5.9x faster with identical refs. The sixth cannot path
+every match, so the query is re-run as a walk (`method: "collection+walk"`) and
+costs ~10% more than walking directly — the price of never returning an
+incomplete set by default.
 
-The one trade-off: a collection match whose path cannot be *proven* is emitted
-with `ref_ok:false` (matched and on-screen, but no ref) rather than dropped or
-guessed. On gnome-control-center's full interactive set, 14 of 37 came back
-that way; with a `--role` filter, 3 of 3 were fully pathed. Use `--walk` when
-you need a ref for every element.
+Forcing: `--collection` keeps the fast result *including* `ref_ok:false`
+entries; `--walk` skips the query entirely. `method` always reports what ran.
 
-`linux-use roles` lists all 130 role names and flags the 18 that are
-interactive by default. An unknown `--role` matches nothing and says so on
-stderr instead of silently returning zero.
+`linux-use roles` lists all 130 role names and flags the 18 interactive by
+default. An unknown `--role` matches nothing and says so on stderr.
 
 ## Depth: shallow answers are now loud
 
@@ -207,12 +209,15 @@ Exit codes: `0` ok · `80` usage · `81` no_a11y · `82` app_not_found ·
 - **watch**: 450 events streamed while driving the app; `--max-events 5`
   returned exactly 5; an event ref resolved to the right widget once the
   volatile fingerprint was accounted for.
-- **Collection**: identical refs to the walk on gnome-calculator (28/28) and
-  zero wrong refs on gnome-control-center after the index fix; ~9x faster on a
-  narrow `--role` query.
+- **Collection**: identical refs to the walk on every app tested, zero wrong
+  refs; 1.1–5.9x faster on five of six apps after memoizing path reconstruction.
 - **watch --role**: 54 events → 6 with `--role editbar`.
-- **watch memory**: 8436 kB → **8436 kB** across 450 events after the arena fix
-  (before it: 8304 → 15812 kB, ~17 kB leaked per event).
+- **watch memory**: the arena fix cut per-event growth from **~17 kB/event**
+  (8304 → 15812 kB over 450 events) to **~0.17 kB/event** — a ~100x reduction,
+  but *not* zero. An earlier version of this README claimed zero; that was read
+  off two samples that happened to coincide over a short run. Measured across
+  ~1000 events, v0.3 and v0.4 both grow ~190 kB per 1000 events. Bound long
+  watches with `--duration`/`--max-events`; see Known limitations.
 
 ## Hard-won machin FFI findings
 
@@ -272,15 +277,19 @@ These cost real debugging time and are the non-obvious part of this codebase.
   `click`/`key` are X11-only. AT-SPI `act`/`type`/`read` still work.
 - The tree walk is still recursive with a node budget; it warns and sets
   `truncated:true`/`depth_limited:true` rather than silently capping.
-- `watch` cannot yet filter by role or dedupe repeated events; a chatty app can
-  produce a lot of lines. Bound it with `--max-events`/`--duration`.
+- `watch` cannot yet dedupe repeated events; a chatty app produces a lot of
+  lines. Filter with `--role`/`--events` and bound with `--max-events`/`--duration`.
+- `watch` still grows ~0.17 kB per event (down from ~17 kB before the arena
+  fix, but not zero). A million events would cost roughly 190 MB, so long-lived
+  listeners should be bounded and restarted rather than run indefinitely.
 
-## Next (v0.4)
+## Next (v0.5)
 
-1. Cheap path reconstruction for collection matches — the remaining bottleneck,
-   and what would make collection the unconditional default.
-2. Consecutive-event dedupe in `watch`.
-3. Injector backend abstraction (`xtest | uinput | libei | portal`) so Wayland
+1. Close the residual ~0.17 kB/event growth in `watch`.
+2. Path the matches that gnome-control-center cannot resolve, so the
+   `collection+walk` fallback becomes unnecessary.
+3. Consecutive-event dedupe in `watch`.
+4. Injector backend abstraction (`xtest | uinput | libei | portal`) so Wayland
    becomes a backend rather than a rewrite.
 4. The remaining three specs: update, feedback, telemetry.
 5. Screenshots + a vision fallback for the apps that expose no tree.

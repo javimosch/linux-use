@@ -117,7 +117,7 @@ var ST_VISIBLE = 30
 var COORD_SCREEN = 0
 var KEY_STRING = 4
 
-var VERSION = "0.3.0"
+var VERSION = "0.4.0"
 var SCHEMA = "linux-use/v1"
 
 // ---------------------------------------------------------------- json utils
@@ -390,11 +390,14 @@ func interactive_roles() (r) {
 // collect runs a server-side collection query and returns JSON rows. ok=false
 // means the app exposes no Collection interface and the caller must fall back
 // to walking. Unmatched roles are reported so a typo is not silent.
-func collect(appname, app, rolefilter, maxnodes) (out, n, ok, unknown) {
+func collect(appname, app, rolefilter, maxnodes) (out, n, ok, unknown, unpathed) {
 	out = []string{}
 	n = 0
 	ok = false
 	unknown = ""
+	unpathed = 0
+	cacheOn = true
+	pcache_reset()
 	names := interactive_roles()
 	if len(rolefilter) > 0 {
 		names = []string{rolefilter}
@@ -444,6 +447,17 @@ func collect(appname, app, rolefilter, maxnodes) (out, n, ok, unknown) {
 								// than silently dropping it from the answer.
 								path, an, pok := pathof(node)
 								refok := pok && an == appname
+								if !refok {
+									unpathed = unpathed + 1
+									if !forceCollection {
+										// The caller wants complete refs, so this
+										// result is already doomed to be redone as
+										// a walk. Stop now instead of paying for
+										// the rest of the matches.
+										i = cnt
+										w = nwin
+									}
+								}
 								out = append(out, nodejson(appname, node, path, role, name, refok))
 								n = n + 1
 							}
@@ -469,6 +483,7 @@ var visited = 0
 var deepest = 0
 var depthCut = false
 var forceWalk = false
+var forceCollection = false
 var findMethod = "collection"
 var wantAll = false
 var wantRole = ""
@@ -639,15 +654,25 @@ func cmd_state(appname, maxdepth, maxnodes) (out, code) {
 	t0 := now_ms()
 	cok := false
 	if !forceWalk {
-		crows, _, okc, unk := collect(appname, app, wantRole, maxnodes)
+		crows, _, okc, unk, unp := collect(appname, app, wantRole, maxnodes)
 		unknown = unk
 		cok = okc
 		if okc {
 			rows = crows
+			// A collection match whose path could not be proven has no ref.
+			// Unless the caller explicitly asked for the collection path,
+			// prefer a complete answer over a fast one and re-run as a walk.
+			if unp > 0 && !forceCollection {
+				cok = false
+				method = "collection+walk"
+				rows = []string{}
+			}
 		}
 	}
 	if !cok {
-		method = "walk"
+		if method == "collection" {
+			method = "walk"
+		}
 		walk(appname, app, "", 0, maxdepth)
 	}
 	ms := now_ms() - t0
@@ -698,10 +723,15 @@ func cmd_find(query, appfilter, maxdepth, maxnodes) (out, code) {
 				budget = maxnodes
 				cok := false
 				if !forceWalk {
-					crows, _, okc, _ := collect(nm, a, wantRole, maxnodes)
+					crows, _, okc, _, unp := collect(nm, a, wantRole, maxnodes)
 					cok = okc
 					if okc {
 						rows = crows
+						if unp > 0 && !forceCollection {
+							cok = false
+							findMethod = "collection+walk"
+							rows = []string{}
+						}
 					}
 				}
 				if !cok {
@@ -1200,8 +1230,20 @@ func sameobj(a, b) (r) {
 	r = a == b
 }
 
+var icache = make(map[string]string)
+
 func indexof(node) (idx) {
 	idx = -1
+	ck := ""
+	cv := ""
+	if cacheOn {
+		ck = str(node)
+		cv = icache[ck]
+	}
+	if len(cv) > 0 {
+		idx = parse_int(cv) - 1
+		return
+	}
 	par := atspi_accessible_get_parent(node, 0)
 	if par == 0 {
 		return
@@ -1219,6 +1261,9 @@ func indexof(node) (idx) {
 			g_object_unref(c)
 			if same {
 				idx = hint
+				if cacheOn {
+					icache[ck] = str(idx + 1)
+				}
 				g_object_unref(par)
 				return
 			}
@@ -1233,6 +1278,9 @@ func indexof(node) (idx) {
 			g_object_unref(c)
 			if same {
 				idx = i
+				if cacheOn {
+					icache[ck] = str(idx + 1)
+				}
 				g_object_unref(par)
 				return
 			}
@@ -1242,45 +1290,109 @@ func indexof(node) (idx) {
 	g_object_unref(par)
 }
 
-// pathof reconstructs a ref by walking UP from an event source. ok=false means
-// an ancestor index could not be determined — the ref would be WRONG, so it is
-// reported as unusable rather than emitted as a plausible lie.
+// pcache memoizes "path from the application root" per accessible, keyed by
+// pointer. Collection matches are siblings in a tree: each one climbs through
+// the SAME ancestors, so without memoization the climb is re-walked once per
+// match and eats the whole benefit of the server-side query.
+//
+// Lifetime is ONE query. Paths are only valid for the tree as it was; keeping
+// entries across a UI change would resurrect the exact bug this tool exists to
+// avoid — a ref that resolves to the wrong widget.
+var pcache = make(map[string]string)
+var cacheOn = false
+
+func pcache_reset() {
+	pcache = make(map[string]string)
+	icache = make(map[string]string)
+}
+
+// pathof reconstructs a ref by walking UP to the application, memoizing every
+// ancestor it passes. ok=false means an ancestor index could not be determined
+// — the ref would be WRONG, so it is reported as unusable rather than emitted
+// as a plausible lie.
 func pathof(node) (path, appname, ok) {
 	path = ""
 	appname = ""
 	ok = false
+	keys := []string{}
+	idxs := []int{}
+	prefix := ""
 	cur := node
 	owned := false
 	hops := 0
-	while cur != 0 && hops < 64 {
-		r := noderole(cur)
-		if r == "application" {
-			appname = nodename(cur)
-			ok = true
-			if owned {
-				g_object_unref(cur)
+	basePath := ""
+	baseApp := ""
+	done := false
+	bad := false
+	while !done && !bad && hops < 64 {
+		k := ""
+		cv := ""
+		if cacheOn {
+			k = str(cur)
+			cv = pcache[k]
+		}
+		if len(cv) > 0 {
+			parts := split(cv, "\t")
+			baseApp = parts[0]
+			basePath = parts[1]
+			done = true
+		} else {
+			if noderole(cur) == "application" {
+				baseApp = nodename(cur)
+				basePath = ""
+				if cacheOn {
+					pcache[k] = baseApp + "\t"
+				}
+				done = true
+			} else {
+				idx := indexof(cur)
+				if idx < 0 {
+					bad = true
+				} else {
+					if cacheOn {
+						keys = append(keys, k)
+						idxs = append(idxs, idx)
+					} else {
+						// Uncached (watch): accumulate directly. The two arrays
+						// exist only to backfill the cache, and allocating them
+						// per event is a slow leak in a long-lived listener.
+						prefix = "/" + str(idx) + prefix
+					}
+					nxt := atspi_accessible_get_parent(cur, 0)
+					if owned {
+						g_object_unref(cur)
+					}
+					cur = nxt
+					owned = true
+					if cur == 0 {
+						bad = true
+					}
+					hops = hops + 1
+				}
 			}
-			return
 		}
-		idx := indexof(cur)
-		if idx < 0 {
-			if owned {
-				g_object_unref(cur)
-			}
-			return
-		}
-		path = "/" + str(idx) + path
-		nxt := atspi_accessible_get_parent(cur, 0)
-		if owned {
-			g_object_unref(cur)
-		}
-		cur = nxt
-		owned = true
-		hops = hops + 1
 	}
 	if owned && cur != 0 {
 		g_object_unref(cur)
 	}
+	if bad || !done {
+		return
+	}
+	appname = baseApp
+	if !cacheOn {
+		path = basePath + prefix
+		ok = true
+		return
+	}
+	acc := basePath
+	j := len(keys) - 1
+	while j >= 0 {
+		acc = acc + "/" + str(idxs[j])
+		pcache[keys[j]] = appname + "\t" + acc
+		j = j - 1
+	}
+	path = acc
+	ok = true
 }
 
 // on_event runs for the life of the process, so every allocation it makes
@@ -1297,6 +1409,10 @@ func on_event(ev, data) {
 	if wchMax > 0 && wchSeen >= wchMax {
 		return
 	}
+	// No path cache here: one event means one climb, so the cache would buy
+	// nothing — and its maps are allocated OUTSIDE the arena below, so they
+	// would leak once per event. (Measured at ~17 kB/event before the arena.)
+	cacheOn = false
 	arena {
 		emit := true
 		etype := takestr_borrowed(lu_ev_type(ev))
@@ -1672,14 +1788,13 @@ func run_cmd(argv) (out, code) {
 	// for every interactive role, where per-match path reconstruction eats the
 	// gain and some matches come back unpathable). So: collection when a role
 	// filter narrows it, the walk otherwise. Either can be forced.
-	useCollection := len(flag_get(fs, "role")) > 0
-	if flag_on(fs, "collection") {
-		useCollection = true
-	}
-	if flag_on(fs, "walk") || flag_on(fs, "all") {
-		useCollection = false
-	}
-	forceWalk = !useCollection
+	// v0.4: with the climb memoized, a collection query is 2-5x faster than the
+	// walk, so it is tried FIRST for every query. If any match comes back
+	// without a provable ref, the query is re-run as a walk — a complete answer
+	// beats a fast one. --collection keeps the fast result (with ref_ok:false
+	// entries); --walk skips the query entirely.
+	forceCollection = flag_on(fs, "collection")
+	forceWalk = flag_on(fs, "walk") || flag_on(fs, "all")
 	wantRole = flag_get(fs, "role")
 	wantText = ""
 	depth := flag_int_val(fs, "depth")
