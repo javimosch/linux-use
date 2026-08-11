@@ -1,0 +1,1613 @@
+// linux-use — agent-first GUI control for Linux desktops.
+//
+// Perception: AT-SPI2 accessibility tree. Actuation: AT-SPI actions first,
+// XTEST synthetic input as fallback. No LLM inside — the agent is the loop.
+//
+// Composed with framework/machweb.src + framework/flags.src by build.sh.
+
+extern "atspi" {
+	cflags "-I/usr/include/at-spi-2.0 -I/usr/include/dbus-1.0 -I/usr/lib/x86_64-linux-gnu/dbus-1.0/include -I/usr/include/glib-2.0 -I/usr/lib/x86_64-linux-gnu/glib-2.0/include"
+	link "atspi"
+	header "atspi/atspi.h"
+	fn atspi_init() i32
+	fn atspi_exit() i32
+	fn atspi_get_desktop(i32) ptr
+	fn atspi_accessible_get_child_count(ptr, ptr) i32
+	fn atspi_accessible_get_child_at_index(ptr, i32, ptr) ptr
+	fn atspi_accessible_get_name(ptr, ptr) ptr
+	fn atspi_accessible_get_role_name(ptr, ptr) ptr
+	fn atspi_accessible_get_description(ptr, ptr) ptr
+	fn atspi_accessible_get_state_set(ptr) ptr
+	fn atspi_state_set_contains(ptr, i32) bool
+	fn atspi_accessible_get_component_iface(ptr) ptr
+	fn atspi_component_get_extents(ptr, i32, ptr) ptr
+	fn atspi_component_grab_focus(ptr, ptr) bool
+	fn atspi_accessible_get_action_iface(ptr) ptr
+	fn atspi_action_get_n_actions(ptr, ptr) i32
+	fn atspi_action_get_action_name(ptr, i32, ptr) ptr
+	fn atspi_action_do_action(ptr, i32, ptr) bool
+	fn atspi_accessible_get_text_iface(ptr) ptr
+	fn atspi_text_get_character_count(ptr, ptr) i32
+	fn atspi_text_get_text(ptr, i32, i32, ptr) ptr
+	fn atspi_text_get_caret_offset(ptr, ptr) i32
+	fn atspi_accessible_get_editable_text_iface(ptr) ptr
+	fn atspi_editable_text_set_text_contents(ptr, string, ptr) bool
+	fn atspi_editable_text_insert_text(ptr, i32, string, i32, ptr) bool
+	fn atspi_generate_keyboard_event(i64, string, i32, ptr) bool
+	fn atspi_accessible_get_parent(ptr, ptr) ptr
+	fn atspi_accessible_get_index_in_parent(ptr, ptr) i32
+	fn atspi_event_listener_new(cb(ptr, ptr), ptr, ptr) ptr
+	fn atspi_event_listener_register(ptr, string, ptr) bool
+	fn atspi_event_main()
+	fn atspi_event_quit()
+}
+
+extern "glib" {
+	cflags "-I/usr/include/glib-2.0 -I/usr/lib/x86_64-linux-gnu/glib-2.0/include"
+	link "gobject-2.0" link "glib-2.0"
+	header "glib-object.h"
+	fn g_object_unref(ptr)
+	fn g_free(ptr)
+	fn g_timeout_add(u32, cb(ptr) bool, ptr) u32
+}
+
+extern "lu" {
+	cflags "-I. -I/usr/include/at-spi-2.0 -I/usr/include/dbus-1.0 -I/usr/lib/x86_64-linux-gnu/dbus-1.0/include -I/usr/include/glib-2.0 -I/usr/lib/x86_64-linux-gnu/glib-2.0/include"
+	header "lu_helpers.h"
+	fn lu_cstr(ptr) string
+	fn lu_ev_type(ptr) string
+	fn lu_ev_source(ptr) ptr
+	fn lu_ev_detail1(ptr) i32
+	fn lu_ev_detail2(ptr) i32
+}
+
+extern "x11" {
+	link "X11" link "Xtst"
+	header "X11/extensions/XTest.h"
+	fn XOpenDisplay(string) ptr
+	fn XCloseDisplay(ptr) i32
+	fn XFlush(ptr) i32
+	fn XSync(ptr, bool) i32
+	fn XDefaultRootWindow(ptr) u64
+	fn XQueryPointer(ptr, u64, ptr, ptr, ptr, ptr, ptr, ptr, ptr) bool
+	fn XTestFakeMotionEvent(ptr, i32, i32, i32, u64) i32
+	fn XTestFakeButtonEvent(ptr, u32, i32, u64) i32
+	fn XTestFakeKeyEvent(ptr, u32, i32, u64) i32
+	fn XStringToKeysym(string) u64
+	fn XKeysymToKeycode(ptr, u64) u32
+}
+
+// ---------------------------------------------------------------- constants
+
+// Exit codes (cli-output-spec: semantic, 80-119).
+var EX_OK = 0
+var EX_USAGE = 80
+var EX_NO_A11Y = 81
+var EX_APP_NOT_FOUND = 82
+var EX_REF_STALE = 83
+var EX_REF_NOT_FOUND = 84
+var EX_NO_CAPABILITY = 85
+var EX_ACTION_FAILED = 86
+var EX_NO_DISPLAY = 87
+var EX_DAEMON = 88
+var EX_REFUSED = 89
+
+// AT-SPI enum ordinals (verified against atspi-constants.h on 2.44).
+var ST_ACTIVE = 1
+var ST_EDITABLE = 7
+var ST_ENABLED = 8
+var ST_FOCUSABLE = 11
+var ST_FOCUSED = 12
+var ST_SENSITIVE = 24
+var ST_SHOWING = 25
+var ST_VISIBLE = 30
+var COORD_SCREEN = 0
+var KEY_STRING = 4
+
+var VERSION = "0.2.0"
+var SCHEMA = "linux-use/v1"
+
+// ---------------------------------------------------------------- json utils
+
+func jesc(s) (r) {
+	r = ""
+	i := 0
+	while i < len(s) {
+		c := charat(s, i)
+		if c == "\"" {
+			r = r + "\\\""
+		} else {
+			if c == "\\" {
+				r = r + "\\\\"
+			} else {
+				if c == "\n" {
+					r = r + "\\n"
+				} else {
+					if c == "\t" {
+						r = r + "\\t"
+					} else {
+						if c == "\r" {
+							r = r + "\\r"
+						} else {
+							r = r + c
+						}
+					}
+				}
+			}
+		}
+		i = i + 1
+	}
+}
+
+func jstr(s) (r) {
+	r = "\"" + jesc(s) + "\""
+}
+
+func jkv(k, v) (r) {
+	r = jstr(k) + ":" + v
+}
+
+func jarr(items) (r) {
+	r = "[" + join(items, ",") + "]"
+}
+
+func jbool(b) (r) {
+	r = "false"
+	if b {
+		r = "true"
+	}
+}
+
+// ---------------------------------------------------------------- errors
+
+// errjson builds the cli-output-spec error envelope.
+func errjson(code, msg, recoverable, suggestions) (r) {
+	sg := []string{}
+	i := 0
+	while i < len(suggestions) {
+		sg = append(sg, jstr(suggestions[i]))
+		i = i + 1
+	}
+	r = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "false") + "," + jkv("error", "{" + jkv("code", jstr(code)) + "," + jkv("message", jstr(msg)) + "," + jkv("recoverable", jbool(recoverable)) + "," + jkv("suggestions", jarr(sg)) + "}") + "}"
+}
+
+// ---------------------------------------------------------------- fingerprints
+
+// fp is a stable-ish identity for a node: role + name, hashed. Element refs
+// carry it so a stale ref is DETECTED rather than silently acting on the
+// wrong widget.
+func fp(role, name) (r) {
+	b := bytes(role + "|" + name)
+	h := 2166136261
+	i := 0
+	n := len(role) + 1 + len(name)
+	while i < n {
+		h = (h*131 + byte_at(b, i)) % 1000000007
+		i = i + 1
+	}
+	r = str(h)
+}
+
+func mkref(app, path, role, name) (r) {
+	r = app + ":" + path + "#" + fp(role, name)
+}
+
+// splitref returns (app, path, wantfp).
+func splitref(ref) (app, path, want) {
+	app = ""
+	path = ""
+	want = ""
+	hp := split(ref, "#")
+	left := hp[0]
+	if len(hp) > 1 {
+		want = hp[1]
+	}
+	parts := split(left, ":")
+	if len(parts) < 2 {
+		return
+	}
+	path = parts[len(parts)-1]
+	app = join(parts[0:len(parts)-1], ":")
+}
+
+// ---------------------------------------------------------------- atspi core
+
+var desktop = 0
+
+func a11y_up() (ok) {
+	ok = false
+	if desktop != 0 {
+		ok = true
+		return
+	}
+	rc := atspi_init()
+	if rc < 0 {
+		return
+	}
+	desktop = atspi_get_desktop(0)
+	if desktop == 0 {
+		return
+	}
+	ok = true
+}
+
+// takestr consumes a heap `gchar*` from AT-SPI: alias it, copy it into an
+// owned MFL string, then free the original. A `string` returned across the FFI
+// boundary ALIASES the C buffer rather than copying it, so the copy here is
+// load-bearing — without it the value dangles the moment the pointer is freed.
+// takestr_borrowed copies a C string the caller does NOT own (so no free).
+func takestr_borrowed(v) (r) {
+	r = bytes_str(bytes(v))
+}
+
+func takestr(p) (r) {
+	r = ""
+	if p == 0 {
+		return
+	}
+	// bytes_str(bytes(...)) forces a MATERIALIZED copy. substr()/len() on an
+	// FFI-aliased string are lazy enough that the g_free below would otherwise
+	// leave the result reading freed memory (observed as silently TRUNCATED
+	// strings, not a crash).
+	r = bytes_str(bytes(lu_cstr(p)))
+	g_free(p)
+}
+
+func nodename(node) (r) {
+	r = takestr(atspi_accessible_get_name(node, 0))
+}
+
+func noderole(node) (r) {
+	r = takestr(atspi_accessible_get_role_name(node, 0))
+}
+
+func hasstate(node, st) (b) {
+	b = false
+	ss := atspi_accessible_get_state_set(node)
+	if ss != 0 {
+		b = atspi_state_set_contains(ss, st)
+		g_object_unref(ss)
+	}
+}
+
+// findapp returns a NEW ref to the application, or 0. Caller unrefs.
+func findapp(want) (app) {
+	app = 0
+	n := atspi_accessible_get_child_count(desktop, 0)
+	i := 0
+	while i < n {
+		a := atspi_accessible_get_child_at_index(desktop, i, 0)
+		if a != 0 {
+			if nodename(a) == want {
+				app = a
+				return
+			}
+			g_object_unref(a)
+		}
+		i = i + 1
+	}
+}
+
+// resolve walks a slash path from app. Returns a NEW ref, or 0.
+func resolve(app, path) (node) {
+	node = app
+	first := true
+	segs := split(path, "/")
+	i := 0
+	while i < len(segs) {
+		s := segs[i]
+		if len(s) > 0 {
+			c := atspi_accessible_get_child_at_index(node, parse_int(s), 0)
+			if !first {
+				g_object_unref(node)
+			}
+			first = false
+			node = c
+			if node == 0 {
+				return
+			}
+		}
+		i = i + 1
+	}
+	if first {
+		// path was empty: hand back an owned ref to the app itself
+		node = atspi_accessible_get_child_at_index(app, 0, 0)
+	}
+}
+
+// extents returns (x, y, w, h); w<=0 means unknown.
+func extents(node) (x, y, w, h) {
+	x = 0
+	y = 0
+	w = 0
+	h = 0
+	comp := atspi_accessible_get_component_iface(node)
+	if comp == 0 {
+		return
+	}
+	r := atspi_component_get_extents(comp, COORD_SCREEN, 0)
+	if r != 0 {
+		x = peek_i32(r, 0)
+		y = peek_i32(r, 4)
+		w = peek_i32(r, 8)
+		h = peek_i32(r, 12)
+		free(r)
+	}
+	g_object_unref(comp)
+}
+
+func interactive(role) (b) {
+	b = role == "push button" || role == "toggle button" || role == "check box" || role == "radio button" || role == "menu item" || role == "check menu item" || role == "radio menu item" || role == "entry" || role == "text" || role == "password text" || role == "combo box" || role == "link" || role == "list item" || role == "page tab" || role == "slider" || role == "menu" || role == "table cell" || role == "spin button"
+}
+
+// ---------------------------------------------------------------- tree walk
+
+var rows = []string{}
+var budget = 0
+var visited = 0
+var deepest = 0
+var depthCut = false
+var wantAll = false
+var wantRole = ""
+var wantText = ""
+
+func nodejson(appname, node, path, role, name) (r) {
+	x, y, w, h := extents(node)
+	nacts := 0
+	act0 := ""
+	ai := atspi_accessible_get_action_iface(node)
+	if ai != 0 {
+		nacts = atspi_action_get_n_actions(ai, 0)
+		if nacts > 0 {
+			act0 = takestr(atspi_action_get_action_name(ai, 0, 0))
+		}
+		g_object_unref(ai)
+	}
+	fields := []string{}
+	fields = append(fields, jkv("ref", jstr(mkref(appname, path, role, name))))
+	fields = append(fields, jkv("role", jstr(role)))
+	fields = append(fields, jkv("name", jstr(name)))
+	fields = append(fields, jkv("x", str(x)))
+	fields = append(fields, jkv("y", str(y)))
+	fields = append(fields, jkv("w", str(w)))
+	fields = append(fields, jkv("h", str(h)))
+	fields = append(fields, jkv("cx", str(x+w/2)))
+	fields = append(fields, jkv("cy", str(y+h/2)))
+	fields = append(fields, jkv("actions", str(nacts)))
+	fields = append(fields, jkv("action", jstr(act0)))
+	fields = append(fields, jkv("enabled", jbool(hasstate(node, ST_ENABLED))))
+	fields = append(fields, jkv("focused", jbool(hasstate(node, ST_FOCUSED))))
+	fields = append(fields, jkv("editable", jbool(hasstate(node, ST_EDITABLE))))
+	r = "{" + join(fields, ",") + "}"
+}
+
+func keep(role, name) (b) {
+	b = true
+	if !wantAll {
+		b = interactive(role)
+	}
+	if b && len(wantRole) > 0 {
+		b = role == wantRole
+	}
+	if b && len(wantText) > 0 {
+		b = contains(to_lower(name), to_lower(wantText))
+	}
+}
+
+// walk consumes `node` (does NOT unref it — the caller owns it).
+func walk(appname, node, path, depth, maxdepth) {
+	if budget <= 0 {
+		return
+	}
+	if depth > maxdepth {
+		// A subtree was cut off by --depth. Silently returning a SHALLOW
+		// answer is the dangerous failure (an agent concludes "no such
+		// widget"), so record it and surface it in the envelope.
+		depthCut = true
+		return
+	}
+	budget = budget - 1
+	visited = visited + 1
+	if depth > deepest {
+		deepest = depth
+	}
+	role := noderole(node)
+	name := nodename(node)
+	if keep(role, name) && hasstate(node, ST_SHOWING) {
+		x, y, w, h := extents(node)
+		if w > 0 && h > 0 {
+			rows = append(rows, nodejson(appname, node, path, role, name))
+		}
+	}
+	n := atspi_accessible_get_child_count(node, 0)
+	i := 0
+	while i < n {
+		c := atspi_accessible_get_child_at_index(node, i, 0)
+		if c != 0 {
+			walk(appname, c, path+"/"+str(i), depth+1, maxdepth)
+			g_object_unref(c)
+		}
+		i = i + 1
+	}
+}
+
+// ---------------------------------------------------------------- commands
+
+func cmd_apps() (out, code) {
+	code = EX_OK
+	items := []string{}
+	n := atspi_accessible_get_child_count(desktop, 0)
+	i := 0
+	while i < n {
+		a := atspi_accessible_get_child_at_index(desktop, i, 0)
+		if a != 0 {
+			nm := nodename(a)
+			kids := atspi_accessible_get_child_count(a, 0)
+			items = append(items, "{"+jkv("name", jstr(nm))+","+jkv("windows", str(kids))+"}")
+			g_object_unref(a)
+		}
+		i = i + 1
+	}
+	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("applications", jarr(items)) + "," + jkv("count", str(len(items))) + "}"
+}
+
+func cmd_windows(appfilter) (out, code) {
+	code = EX_OK
+	items := []string{}
+	n := atspi_accessible_get_child_count(desktop, 0)
+	i := 0
+	while i < n {
+		a := atspi_accessible_get_child_at_index(desktop, i, 0)
+		if a != 0 {
+			nm := nodename(a)
+			if len(appfilter) == 0 || nm == appfilter {
+				wc := atspi_accessible_get_child_count(a, 0)
+				j := 0
+				while j < wc {
+					w := atspi_accessible_get_child_at_index(a, j, 0)
+					if w != 0 {
+						wr := noderole(w)
+						wn := nodename(w)
+						x, y, ww, wh := extents(w)
+						f := []string{}
+						f = append(f, jkv("app", jstr(nm)))
+						f = append(f, jkv("ref", jstr(mkref(nm, "/"+str(j), wr, wn))))
+						f = append(f, jkv("title", jstr(wn)))
+						f = append(f, jkv("role", jstr(wr)))
+						f = append(f, jkv("x", str(x)))
+						f = append(f, jkv("y", str(y)))
+						f = append(f, jkv("w", str(ww)))
+						f = append(f, jkv("h", str(wh)))
+						f = append(f, jkv("active", jbool(hasstate(w, ST_ACTIVE))))
+						items = append(items, "{"+join(f, ",")+"}")
+						g_object_unref(w)
+					}
+					j = j + 1
+				}
+			}
+			g_object_unref(a)
+		}
+		i = i + 1
+	}
+	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("windows", jarr(items)) + "," + jkv("count", str(len(items))) + "}"
+}
+
+func cmd_state(appname, maxdepth, maxnodes) (out, code) {
+	code = EX_OK
+	out = ""
+	app := findapp(appname)
+	if app == 0 {
+		code = EX_APP_NOT_FOUND
+		out = errjson("app_not_found", "no application named '"+appname+"' in the accessibility tree", true, []string{"run: linux-use apps", "the app may not be running, or may not export accessibility (see: linux-use doctor)"})
+		return
+	}
+	rows = []string{}
+	budget = maxnodes
+	visited = 0
+	deepest = 0
+	depthCut = false
+	t0 := now_ms()
+	walk(appname, app, "", 0, maxdepth)
+	ms := now_ms() - t0
+	g_object_unref(app)
+	trunc := budget <= 0
+	f := []string{}
+	f = append(f, jkv("schema", jstr(SCHEMA)))
+	f = append(f, jkv("ok", "true"))
+	f = append(f, jkv("app", jstr(appname)))
+	f = append(f, jkv("elements", jarr(rows)))
+	f = append(f, jkv("count", str(len(rows))))
+	f = append(f, jkv("walk_ms", str(ms)))
+	f = append(f, jkv("nodes_visited", str(visited)))
+	f = append(f, jkv("deepest", str(deepest)))
+	f = append(f, jkv("depth_limit", str(maxdepth)))
+	f = append(f, jkv("depth_limited", jbool(depthCut)))
+	f = append(f, jkv("truncated", jbool(trunc)))
+	out = "{" + join(f, ",") + "}"
+	if trunc {
+		write(2, "warning: node budget exhausted — results are TRUNCATED; narrow with --role/--app or raise --max-nodes\n")
+	}
+	if depthCut {
+		write(2, "warning: subtrees were cut at --depth " + str(maxdepth) + " — deeper widgets are NOT in this result; raise --depth\n")
+	}
+}
+
+func cmd_find(query, appfilter, maxdepth, maxnodes) (out, code) {
+	code = EX_OK
+	wantText = query
+	all := []string{}
+	visited = 0
+	deepest = 0
+	depthCut = false
+	t0 := now_ms()
+	n := atspi_accessible_get_child_count(desktop, 0)
+	i := 0
+	while i < n {
+		a := atspi_accessible_get_child_at_index(desktop, i, 0)
+		if a != 0 {
+			nm := nodename(a)
+			if len(appfilter) == 0 || nm == appfilter {
+				rows = []string{}
+				budget = maxnodes
+				walk(nm, a, "", 0, maxdepth)
+				j := 0
+				while j < len(rows) {
+					all = append(all, rows[j])
+					j = j + 1
+				}
+			}
+			g_object_unref(a)
+		}
+		i = i + 1
+	}
+	ms := now_ms() - t0
+	f := []string{}
+	f = append(f, jkv("schema", jstr(SCHEMA)))
+	f = append(f, jkv("ok", "true"))
+	f = append(f, jkv("query", jstr(query)))
+	f = append(f, jkv("matches", jarr(all)))
+	f = append(f, jkv("count", str(len(all))))
+	f = append(f, jkv("search_ms", str(ms)))
+	f = append(f, jkv("nodes_visited", str(visited)))
+	f = append(f, jkv("deepest", str(deepest)))
+	f = append(f, jkv("depth_limited", jbool(depthCut)))
+	out = "{" + join(f, ",") + "}"
+	if depthCut {
+		write(2, "warning: subtrees were cut at --depth " + str(maxdepth) + "; raise --depth if the target is missing\n")
+	}
+}
+
+// getnode resolves a ref and VERIFIES its fingerprint. Returns (node, errjson, code).
+// node is a new ref the caller must unref when code == EX_OK.
+func getnode(ref) (node, out, code) {
+	node = 0
+	out = ""
+	code = EX_OK
+	appname, path, want := splitref(ref)
+	if len(appname) == 0 {
+		code = EX_USAGE
+		out = errjson("bad_ref", "ref must look like 'app:/0/1/2#fingerprint'", true, []string{"take refs verbatim from: linux-use state --app <app>"})
+		return
+	}
+	app := findapp(appname)
+	if app == 0 {
+		code = EX_APP_NOT_FOUND
+		out = errjson("app_not_found", "no application named '"+appname+"'", true, []string{"run: linux-use apps"})
+		return
+	}
+	node = resolve(app, path)
+	g_object_unref(app)
+	if node == 0 {
+		code = EX_REF_NOT_FOUND
+		out = errjson("ref_not_found", "path '"+path+"' does not exist in "+appname, true, []string{"the UI changed; re-run: linux-use state --app " + appname})
+		return
+	}
+	if len(want) > 0 {
+		got := fp(noderole(node), nodename(node))
+		if got != want {
+			g_object_unref(node)
+			node = 0
+			code = EX_REF_STALE
+			out = errjson("ref_stale", "ref points at a different widget than when it was captured", true, []string{"the UI changed; re-run: linux-use state --app " + appname, "then use the fresh ref"})
+			return
+		}
+	}
+}
+
+func cmd_act(ref, which) (out, code) {
+	node, out, code := getnode(ref)
+	if code != EX_OK {
+		return
+	}
+	role := noderole(node)
+	name := nodename(node)
+	ai := atspi_accessible_get_action_iface(node)
+	if ai == 0 {
+		g_object_unref(node)
+		code = EX_NO_CAPABILITY
+		out = errjson("no_action", "'"+role+"' exposes no accessible action", true, []string{"use: linux-use click " + ref + " (synthetic pointer fallback)"})
+		return
+	}
+	nacts := atspi_action_get_n_actions(ai, 0)
+	idx := 0
+	if len(which) > 0 {
+		idx = parse_int(which)
+	}
+	if idx >= nacts {
+		g_object_unref(ai)
+		g_object_unref(node)
+		code = EX_USAGE
+		out = errjson("bad_action_index", "action "+str(idx)+" out of range (element has "+str(nacts)+")", true, []string{"omit --action to use action 0"})
+		return
+	}
+	an := takestr(atspi_action_get_action_name(ai, idx, 0))
+	ok := atspi_action_do_action(ai, idx, 0)
+	g_object_unref(ai)
+	g_object_unref(node)
+	if !ok {
+		code = EX_ACTION_FAILED
+		out = errjson("action_failed", "the toolkit refused action '"+an+"'", true, []string{"use: linux-use click " + ref})
+		return
+	}
+	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("ref", jstr(ref)) + "," + jkv("role", jstr(role)) + "," + jkv("name", jstr(name)) + "," + jkv("action", jstr(an)) + "}"
+}
+
+func cmd_read(ref) (out, code) {
+	node, out, code := getnode(ref)
+	if code != EX_OK {
+		return
+	}
+	role := noderole(node)
+	name := nodename(node)
+	txt := ""
+	nc := 0
+	ti := atspi_accessible_get_text_iface(node)
+	if ti != 0 {
+		nc = atspi_text_get_character_count(ti, 0)
+		if nc > 0 {
+			txt = takestr(atspi_text_get_text(ti, 0, nc, 0))
+		}
+		g_object_unref(ti)
+	}
+	desc := takestr(atspi_accessible_get_description(node, 0))
+	g_object_unref(node)
+	f := []string{}
+	f = append(f, jkv("schema", jstr(SCHEMA)))
+	f = append(f, jkv("ok", "true"))
+	f = append(f, jkv("ref", jstr(ref)))
+	f = append(f, jkv("role", jstr(role)))
+	f = append(f, jkv("name", jstr(name)))
+	f = append(f, jkv("description", jstr(desc)))
+	f = append(f, jkv("chars", str(nc)))
+	f = append(f, jkv("text", jstr(txt)))
+	out = "{" + join(f, ",") + "}"
+}
+
+func cmd_type(ref, text, replace, allowpw) (out, code) {
+	node, out, code := getnode(ref)
+	if code != EX_OK {
+		return
+	}
+	role := noderole(node)
+	if role == "password text" && !allowpw {
+		g_object_unref(node)
+		code = EX_REFUSED
+		out = errjson("refused_password_field", "refusing to type into a password field", false, []string{"pass --allow-password if this is genuinely intended"})
+		return
+	}
+	method := ""
+	ok := false
+	et := atspi_accessible_get_editable_text_iface(node)
+	if et != 0 {
+		if replace {
+			ok = atspi_editable_text_set_text_contents(et, text, 0)
+			method = "editable_text.set_contents"
+		} else {
+			pos := 0
+			ti := atspi_accessible_get_text_iface(node)
+			if ti != 0 {
+				pos = atspi_text_get_caret_offset(ti, 0)
+				g_object_unref(ti)
+			}
+			ok = atspi_editable_text_insert_text(et, pos, text, len(text), 0)
+			method = "editable_text.insert"
+		}
+		g_object_unref(et)
+	}
+	if !ok {
+		// Fallback: focus the widget and synthesize the string.
+		comp := atspi_accessible_get_component_iface(node)
+		if comp != 0 {
+			atspi_component_grab_focus(comp, 0)
+			g_object_unref(comp)
+			sleep(40)
+		}
+		ok = atspi_generate_keyboard_event(0, text, KEY_STRING, 0)
+		method = "keyboard.string"
+	}
+	g_object_unref(node)
+	if !ok {
+		code = EX_ACTION_FAILED
+		out = errjson("type_failed", "could not insert text into '"+role+"'", true, []string{"try: linux-use click " + ref + " then linux-use key <keys>"})
+		return
+	}
+	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("ref", jstr(ref)) + "," + jkv("method", jstr(method)) + "," + jkv("chars", str(len(text))) + "}"
+}
+
+// ---------------------------------------------------------------- X11 input
+
+func xopen() (dpy) {
+	dpy = XOpenDisplay(env("DISPLAY"))
+}
+
+func keysym_for(tok) (name) {
+	name = tok
+	if tok == "ctrl" || tok == "control" {
+		name = "Control_L"
+	}
+	if tok == "shift" {
+		name = "Shift_L"
+	}
+	if tok == "alt" {
+		name = "Alt_L"
+	}
+	if tok == "super" || tok == "meta" || tok == "cmd" {
+		name = "Super_L"
+	}
+	if tok == "enter" || tok == "return" {
+		name = "Return"
+	}
+	if tok == "esc" || tok == "escape" {
+		name = "Escape"
+	}
+	if tok == "tab" {
+		name = "Tab"
+	}
+	if tok == "space" {
+		name = "space"
+	}
+	if tok == "backspace" {
+		name = "BackSpace"
+	}
+	if tok == "delete" || tok == "del" {
+		name = "Delete"
+	}
+	if tok == "up" {
+		name = "Up"
+	}
+	if tok == "down" {
+		name = "Down"
+	}
+	if tok == "left" {
+		name = "Left"
+	}
+	if tok == "right" {
+		name = "Right"
+	}
+	if tok == "home" {
+		name = "Home"
+	}
+	if tok == "end" {
+		name = "End"
+	}
+	if tok == "pageup" {
+		name = "Prior"
+	}
+	if tok == "pagedown" {
+		name = "Next"
+	}
+}
+
+func cmd_key(combo) (out, code) {
+	code = EX_OK
+	dpy := xopen()
+	if dpy == 0 {
+		code = EX_NO_DISPLAY
+		out = errjson("no_display", "cannot open X display '"+env("DISPLAY")+"'", false, []string{"this build injects input via XTEST and needs an X11 session", "run: linux-use doctor"})
+		return
+	}
+	toks := split(to_lower(combo), "+")
+	codes := []int{}
+	resolved := []string{}
+	i := 0
+	while i < len(toks) {
+		t := trim(toks[i])
+		if len(t) > 0 {
+			nm := keysym_for(t)
+			ks := XStringToKeysym(nm)
+			if ks == 0 {
+				XCloseDisplay(dpy)
+				code = EX_USAGE
+				out = errjson("unknown_key", "'"+t+"' is not a known key name", true, []string{"use X keysym names, e.g. ctrl+shift+t, Return, F5, Escape"})
+				return
+			}
+			kc := XKeysymToKeycode(dpy, ks)
+			if kc == 0 {
+				XCloseDisplay(dpy)
+				code = EX_USAGE
+				out = errjson("unmapped_key", "'"+nm+"' has no keycode in the current layout", true, []string{"the active keyboard layout cannot produce this key"})
+				return
+			}
+			codes = append(codes, kc)
+			resolved = append(resolved, nm)
+		}
+		i = i + 1
+	}
+	if len(codes) == 0 {
+		XCloseDisplay(dpy)
+		code = EX_USAGE
+		out = errjson("empty_combo", "no keys given", true, []string{"example: linux-use key ctrl+shift+t"})
+		return
+	}
+	i = 0
+	while i < len(codes) {
+		XTestFakeKeyEvent(dpy, codes[i], 1, 0)
+		i = i + 1
+	}
+	i = len(codes) - 1
+	while i >= 0 {
+		XTestFakeKeyEvent(dpy, codes[i], 0, 0)
+		i = i - 1
+	}
+	XSync(dpy, false)
+	XCloseDisplay(dpy)
+	q := []string{}
+	i = 0
+	while i < len(resolved) {
+		q = append(q, jstr(resolved[i]))
+		i = i + 1
+	}
+	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("combo", jstr(combo)) + "," + jkv("keys", jarr(q)) + "}"
+}
+
+func clickxy(x, y, button) (ok) {
+	ok = false
+	dpy := xopen()
+	if dpy == 0 {
+		return
+	}
+	XTestFakeMotionEvent(dpy, -1, x, y, 0)
+	XSync(dpy, false)
+	sleep(40)
+	XTestFakeButtonEvent(dpy, button, 1, 0)
+	XTestFakeButtonEvent(dpy, button, 0, 0)
+	XSync(dpy, false)
+	XCloseDisplay(dpy)
+	ok = true
+}
+
+func cmd_click(ref, px, py, button) (out, code) {
+	code = EX_OK
+	x := px
+	y := py
+	label := "coordinates"
+	if len(ref) > 0 {
+		node, e, c := getnode(ref)
+		if c != EX_OK {
+			out = e
+			code = c
+			return
+		}
+		ex, ey, w, h := extents(node)
+		g_object_unref(node)
+		if w <= 0 || h <= 0 {
+			code = EX_NO_CAPABILITY
+			out = errjson("no_extents", "element has no on-screen geometry to click", true, []string{"use: linux-use act " + ref})
+			return
+		}
+		x = ex + w/2
+		y = ey + h/2
+		label = ref
+	}
+	if !clickxy(x, y, button) {
+		code = EX_NO_DISPLAY
+		out = errjson("no_display", "cannot open X display", false, []string{"run: linux-use doctor"})
+		return
+	}
+	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("target", jstr(label)) + "," + jkv("x", str(x)) + "," + jkv("y", str(y)) + "," + jkv("button", str(button)) + "}"
+}
+
+func cmd_launch(command, waitfor, timeoutms) (out, code) {
+	code = EX_OK
+	rc := system(command + " >/dev/null 2>&1 &")
+	appeared := false
+	waited := 0
+	if len(waitfor) > 0 {
+		while waited < timeoutms {
+			a := findapp(waitfor)
+			if a != 0 {
+				g_object_unref(a)
+				appeared = true
+				waited = timeoutms
+			} else {
+				sleep(200)
+				waited = waited + 200
+			}
+		}
+		if !appeared {
+			code = EX_APP_NOT_FOUND
+			out = errjson("launch_timeout", "'"+waitfor+"' did not appear in the accessibility tree within "+str(timeoutms)+"ms", true, []string{"the app may be slow to start, or may not export accessibility", "run: linux-use apps"})
+			return
+		}
+	}
+	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("command", jstr(command)) + "," + jkv("spawn_rc", str(rc)) + "," + jkv("appeared", jbool(appeared)) + "}"
+}
+
+func cmd_doctor() (out, code) {
+	code = EX_OK
+	f := []string{}
+	f = append(f, jkv("schema", jstr(SCHEMA)))
+	f = append(f, jkv("session_type", jstr(env("XDG_SESSION_TYPE"))))
+	f = append(f, jkv("display", jstr(env("DISPLAY"))))
+	f = append(f, jkv("wayland_display", jstr(env("WAYLAND_DISPLAY"))))
+
+	_, tk, _ := exec("gsettings get org.gnome.desktop.interface toolkit-accessibility 2>/dev/null")
+	tkon := contains(tk, "true")
+	f = append(f, jkv("toolkit_accessibility", jbool(tkon)))
+
+	a11y := a11y_up()
+	f = append(f, jkv("atspi", jbool(a11y)))
+	napps := 0
+	if a11y {
+		napps = atspi_accessible_get_child_count(desktop, 0)
+	}
+	f = append(f, jkv("applications", str(napps)))
+
+	dpy := xopen()
+	xok := dpy != 0
+	if xok {
+		XCloseDisplay(dpy)
+	}
+	f = append(f, jkv("xtest", jbool(xok)))
+
+	probs := []string{}
+	if !tkon {
+		probs = append(probs, jstr("toolkit-accessibility is off — Qt/Java/Electron apps may expose nothing. Fix: gsettings set org.gnome.desktop.interface toolkit-accessibility true"))
+	}
+	if !a11y {
+		probs = append(probs, jstr("the AT-SPI bus is unreachable — perception will not work at all"))
+	}
+	if !xok {
+		probs = append(probs, jstr("no X display — click/key actuation unavailable (Wayland is not supported in v0.1; AT-SPI actions still work)"))
+	}
+	if env("XDG_SESSION_TYPE") == "wayland" {
+		probs = append(probs, jstr("Wayland session: XTEST cannot reach native Wayland clients. Prefer 'act' over 'click'."))
+	}
+	f = append(f, jkv("ok", jbool(len(probs) == 0)))
+	f = append(f, jkv("problems", jarr(probs)))
+	out = "{" + join(f, ",") + "}"
+	if len(probs) > 0 {
+		code = EX_NO_A11Y
+		if a11y {
+			code = EX_OK
+		}
+	}
+}
+
+func cmd_pointer() (out, code) {
+	code = EX_OK
+	dpy := xopen()
+	if dpy == 0 {
+		code = EX_NO_DISPLAY
+		out = errjson("no_display", "cannot open X display", false, []string{"run: linux-use doctor"})
+		return
+	}
+	root := XDefaultRootWindow(dpy)
+	buf := alloc(64)
+	XQueryPointer(dpy, root, buf, buf+8, buf+16, buf+20, buf+24, buf+28, buf+32)
+	x := peek_i32(buf, 16)
+	y := peek_i32(buf, 20)
+	free(buf)
+	XCloseDisplay(dpy)
+	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("x", str(x)) + "," + jkv("y", str(y)) + "}"
+}
+
+// ---------------------------------------------------------------- watch
+
+// The AT-SPI callback is compiled to a raw C function pointer, so it must be
+// CAPTURELESS — every knob it reads is a package global.
+var wchApp = ""
+var wchSeen = 0
+var wchMax = 0
+
+// pathof reconstructs an actionable ref by walking UP from an event source to
+// its application, collecting child indices. Events give us a node, not a path.
+// indexof is atspi_accessible_get_index_in_parent with a fallback. Some nodes
+// report -1; silently DROPPING such a level builds a path that looks valid but
+// resolves to the wrong widget, so scan the parent's children instead.
+func indexof(node) (idx) {
+	idx = atspi_accessible_get_index_in_parent(node, 0)
+	if idx >= 0 {
+		return
+	}
+	par := atspi_accessible_get_parent(node, 0)
+	if par == 0 {
+		return
+	}
+	n := atspi_accessible_get_child_count(par, 0)
+	i := 0
+	while i < n {
+		c := atspi_accessible_get_child_at_index(par, i, 0)
+		if c != 0 {
+			same := c == node
+			g_object_unref(c)
+			if same {
+				idx = i
+				g_object_unref(par)
+				return
+			}
+		}
+		i = i + 1
+	}
+	g_object_unref(par)
+}
+
+// pathof reconstructs a ref by walking UP from an event source. ok=false means
+// an ancestor index could not be determined — the ref would be WRONG, so it is
+// reported as unusable rather than emitted as a plausible lie.
+func pathof(node) (path, appname, ok) {
+	path = ""
+	appname = ""
+	ok = false
+	cur := node
+	owned := false
+	hops := 0
+	while cur != 0 && hops < 64 {
+		r := noderole(cur)
+		if r == "application" {
+			appname = nodename(cur)
+			ok = true
+			if owned {
+				g_object_unref(cur)
+			}
+			return
+		}
+		idx := indexof(cur)
+		if idx < 0 {
+			if owned {
+				g_object_unref(cur)
+			}
+			return
+		}
+		path = "/" + str(idx) + path
+		nxt := atspi_accessible_get_parent(cur, 0)
+		if owned {
+			g_object_unref(cur)
+		}
+		cur = nxt
+		owned = true
+		hops = hops + 1
+	}
+	if owned && cur != 0 {
+		g_object_unref(cur)
+	}
+}
+
+// on_event runs for the life of the process, so every allocation it makes
+// would accumulate. The body lives in an `arena` block whose memory is
+// reclaimed in bulk at the end of each event; nothing escapes it (the JSON is
+// written to stdout inside the block), so the reclamation is safe.
+// NOTE: no `return` may appear inside an arena block (it would skip cleanup),
+// hence the `emit` flag instead of early returns.
+func on_event(ev, data) {
+	src := lu_ev_source(ev)
+	if src == 0 {
+		return
+	}
+	if wchMax > 0 && wchSeen >= wchMax {
+		return
+	}
+	arena {
+		emit := true
+		etype := takestr_borrowed(lu_ev_type(ev))
+		path, appname, pathok := pathof(src)
+		if len(wchApp) > 0 && appname != wchApp {
+			emit = false
+		}
+		if emit {
+			role := noderole(src)
+			name := nodename(src)
+			f := []string{}
+			f = append(f, jkv("event", jstr(etype)))
+			f = append(f, jkv("app", jstr(appname)))
+			f = append(f, jkv("role", jstr(role)))
+			f = append(f, jkv("name", jstr(name)))
+			rf := ""
+			if pathok {
+				rf = mkref(appname, path, role, name)
+			}
+			f = append(f, jkv("ref", jstr(rf)))
+			f = append(f, jkv("ref_ok", jbool(pathok)))
+			f = append(f, jkv("detail1", str(lu_ev_detail1(ev))))
+			f = append(f, jkv("detail2", str(lu_ev_detail2(ev))))
+			f = append(f, jkv("ts", str(now_ms())))
+			println("{" + join(f, ",") + "}")
+			flush()
+			wchSeen = wchSeen + 1
+		}
+	}
+	if wchMax > 0 && wchSeen >= wchMax {
+		atspi_event_quit()
+	}
+}
+
+func default_events() (r) {
+	r = []string{}
+	r = append(r, "object:state-changed:focused")
+	r = append(r, "object:text-changed:insert")
+	r = append(r, "object:text-changed:delete")
+	r = append(r, "object:selection-changed")
+	r = append(r, "window:activate")
+	r = append(r, "window:deactivate")
+	r = append(r, "window:create")
+	r = append(r, "window:destroy")
+}
+
+func cmd_watch(appfilter, evspec, maxev, duration) (out, code) {
+	code = EX_OK
+	out = ""
+	wchApp = appfilter
+	wchSeen = 0
+	wchMax = maxev
+
+	evs := default_events()
+	if len(evspec) > 0 {
+		evs = split(evspec, ",")
+	}
+
+	lst := atspi_event_listener_new(func(ev, data) { on_event(ev, data) }, 0, 0)
+	if lst == 0 {
+		code = EX_NO_A11Y
+		out = errjson("watch_unavailable", "could not create an AT-SPI event listener", false, []string{"run: linux-use doctor"})
+		return
+	}
+	reg := []string{}
+	i := 0
+	while i < len(evs) {
+		e := trim(evs[i])
+		if len(e) > 0 {
+			if atspi_event_listener_register(lst, e, 0) {
+				reg = append(reg, jstr(e))
+			} else {
+				write(2, "warning: could not register for '" + e + "'\n")
+			}
+		}
+		i = i + 1
+	}
+	if len(reg) == 0 {
+		code = EX_USAGE
+		out = errjson("no_events_registered", "none of the requested event types could be registered", true, []string{"omit --events for the default set"})
+		return
+	}
+	// Banner on stderr so stdout stays pure NDJSON.
+	write(2, "linux-use watch: " + str(len(reg)) + " event types registered; NDJSON on stdout\n")
+	if duration > 0 {
+		g_timeout_add(duration, func(d) { atspi_event_quit()  return false }, 0)
+	}
+	atspi_event_main()
+}
+
+// ---------------------------------------------------------------- guide
+
+func guide_json() (r) {
+	c := []string{}
+	c = append(c, jkv("tool", jstr("linux-use")))
+	c = append(c, jkv("version", jstr(VERSION)))
+	c = append(c, jkv("schema", jstr(SCHEMA)))
+	c = append(c, jkv("purpose", jstr("Control a Linux desktop GUI at the accessibility layer. Perception and actuation only — there is no LLM inside; you are the loop.")))
+
+	m := []string{}
+	m = append(m, jstr("Every GUI app publishes a tree of widgets over AT-SPI2. linux-use reads that tree and acts on it. You do NOT need screenshots or pixel coordinates for most work."))
+	m = append(m, jstr("An element ref looks like 'gnome-calculator:/0/1/0/3#824713' — application name, child-index path, and a fingerprint of role+name. Pass refs back verbatim; never construct or edit one by hand."))
+	m = append(m, jstr("Refs go stale when the UI changes. That is DETECTED, not silently ignored: you get exit 83 ref_stale. The fix is always to re-run 'state' and use fresh refs."))
+	m = append(m, jstr("Prefer 'act' over 'click'. 'act' invokes the widget's own accessible action — it needs no focus, no pointer, and works even when the window is fully occluded by another window. 'click' synthesizes a real pointer event and is the fallback for widgets that expose no action."))
+	c = append(c, jkv("mental_model", jarr(m)))
+
+	l := []string{}
+	l = append(l, jstr("1. linux-use apps            — what is running and exposes accessibility"))
+	l = append(l, jstr("2. linux-use state --app X   — the interactive elements of that app, with refs"))
+	l = append(l, jstr("3. linux-use act <ref>       — act on one; or type/key/click as needed"))
+	l = append(l, jstr("4. linux-use read <ref> or state again — VERIFY the effect before the next step"))
+	l = append(l, jstr("Instead of polling step 4 in a sleep loop, run: linux-use watch --app X --duration 5000 (NDJSON, one event per line). Use --max-events N to stop after exactly N."))
+	c = append(c, jkv("loop", jarr(l)))
+
+	g := []string{}
+	g = append(g, jstr("SHOWING does not mean visible. An element can be SHOWING while completely hidden behind another window. Never tell a user 'you can see X' based on this tool."))
+	g = append(g, jstr("Coverage is not universal. GTK/Qt/Chromium/Electron expose good trees. Java needs java-atk-wrapper. Flutter, games, and canvas-drawn UIs may expose almost nothing — 'state' returning 0 elements means no accessibility, not an empty window."))
+	g = append(g, jstr("state is filtered to interactive roles by default. Use --all for the full tree (labels, panels) when you need to READ the UI rather than act on it."))
+	g = append(g, jstr("'type' uses the editable-text interface when available (deterministic, no focus needed) and falls back to synthesized keystrokes. It REFUSES password fields unless --allow-password."))
+	g = append(g, jstr("'key' needs X11: it maps keysyms through the active keyboard layout via XTEST. On Wayland it will fail — use 'act' instead."))
+	g = append(g, jstr("watch emits a ref plus ref_ok. ref_ok:false means the path could not be reconstructed reliably — use the app/role/name fields, do not fabricate a ref."))
+	g = append(g, jstr("For a label whose NAME IS ITS TEXT, the fingerprint changes whenever the text changes, so a ref captured from an event will report ref_stale on the next read. That is the mechanism working: the staleness IS the signal that the content changed. Re-run state, or drop the #fingerprint to address the path alone."))
+	g = append(g, jstr("OBSERVER EFFECT: reading the tree (state/find) can itself make toolkits emit accessibility events. If you run 'watch' while also polling 'state', expect self-induced noise — especially object:state-changed:*, which is why it is not in the default event set."))
+	g = append(g, jstr("Large apps (browsers) have huge trees. Use --role, --depth, or 'find' rather than dumping everything; a truncated walk warns on stderr and sets truncated:true."))
+	c = append(c, jkv("gotchas", jarr(g)))
+
+	e := []string{}
+	e = append(e, jstr("0 ok | 80 usage | 81 no_a11y | 82 app_not_found | 83 ref_stale | 84 ref_not_found | 85 no_capability | 86 action_failed | 87 no_display | 88 daemon | 89 refused"))
+	c = append(c, jkv("exit_codes", jarr(e)))
+
+	o := []string{}
+	o = append(o, jstr("stdout is JSON only — the answer. stderr carries warnings and progress. Branch on the exit code and error.code, never on message text."))
+	o = append(o, jstr("Errors carry recoverable:true/false and a suggestions[] array telling you what to do next. Follow the suggestion before retrying."))
+	c = append(c, jkv("output_contract", jarr(o)))
+
+	d := []string{}
+	d = append(d, jstr("Each invocation connects to the AT-SPI bus from cold. For repeated calls run 'linux-use daemon start' and the registry stays warm."))
+	c = append(c, jkv("daemon", jarr(d)))
+
+	r = "{" + join(c, ",") + "}"
+}
+
+func guide_human() (r) {
+	ls := []string{}
+	ls = append(ls, "linux-use " + VERSION + " — GUI control for Linux at the accessibility layer.")
+	ls = append(ls, "")
+	ls = append(ls, "THE LOOP")
+	ls = append(ls, "  apps  ->  state --app X  ->  act/type/key/click  ->  read/state (verify)")
+	ls = append(ls, "")
+	ls = append(ls, "REFS")
+	ls = append(ls, "  'gnome-calculator:/0/1/0/3#824713' = app : child-path # fingerprint(role+name).")
+	ls = append(ls, "  Pass them back verbatim. Stale refs are detected (exit 83), never guessed at.")
+	ls = append(ls, "")
+	ls = append(ls, "ACT vs CLICK")
+	ls = append(ls, "  act   — the widget's own accessible action. No focus, no pointer, works occluded.")
+	ls = append(ls, "  click — synthetic XTEST pointer. Fallback for widgets exposing no action.")
+	ls = append(ls, "")
+	ls = append(ls, "GOTCHAS")
+	ls = append(ls, "  SHOWING != visible to the user (an occluded widget is still SHOWING).")
+	ls = append(ls, "  0 elements means 'no accessibility', not 'empty window'.")
+	ls = append(ls, "  key needs X11. Wayland: use act.")
+	ls = append(ls, "")
+	ls = append(ls, "Run 'linux-use guide' for the full JSON version, 'linux-use help-json' for the surface.")
+	r = join(ls, "\n")
+}
+
+func helpjson() (r) {
+	cmds := []string{}
+	cmds = append(cmds, "{"+jkv("name", jstr("apps"))+","+jkv("args", jarr([]string{}))+","+jkv("summary", jstr("list applications exposing accessibility"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("windows"))+","+jkv("args", jarr([]string{jstr("--app")}))+","+jkv("summary", jstr("list top-level windows with geometry and active state"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("state"))+","+jkv("args", jarr([]string{jstr("--app (required)"), jstr("--depth"), jstr("--role"), jstr("--all")}))+","+jkv("summary", jstr("interactive elements of an app, with refs"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("find"))+","+jkv("args", jarr([]string{jstr("<query>"), jstr("--app"), jstr("--role"), jstr("--depth")}))+","+jkv("summary", jstr("search elements by name substring"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("act"))+","+jkv("args", jarr([]string{jstr("<ref>"), jstr("--action N")}))+","+jkv("summary", jstr("invoke the element's accessible action (preferred)"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("read"))+","+jkv("args", jarr([]string{jstr("<ref>")}))+","+jkv("summary", jstr("read an element's text, name and description"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("type"))+","+jkv("args", jarr([]string{jstr("<ref>"), jstr("<text>"), jstr("--replace"), jstr("--allow-password")}))+","+jkv("summary", jstr("insert text via the editable-text interface"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("key"))+","+jkv("args", jarr([]string{jstr("<combo>")}))+","+jkv("summary", jstr("send a key combo via XTEST, e.g. ctrl+shift+t"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("click"))+","+jkv("args", jarr([]string{jstr("<ref>"), jstr("--x"), jstr("--y"), jstr("--button")}))+","+jkv("summary", jstr("synthetic pointer click at an element or coordinates"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("launch"))+","+jkv("args", jarr([]string{jstr("<command>"), jstr("--wait-for"), jstr("--timeout")}))+","+jkv("summary", jstr("spawn a program, optionally waiting for it to register"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("watch"))+","+jkv("args", jarr([]string{jstr("--app"), jstr("--events"), jstr("--max-events"), jstr("--duration")}))+","+jkv("summary", jstr("stream AT-SPI events as NDJSON — block on UI change instead of polling"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("pointer"))+","+jkv("args", jarr([]string{}))+","+jkv("summary", jstr("current pointer position"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("doctor"))+","+jkv("args", jarr([]string{}))+","+jkv("summary", jstr("environment health: session type, a11y bus, XTEST"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("serve"))+","+jkv("args", jarr([]string{jstr("--port")}))+","+jkv("summary", jstr("run the warm-registry HTTP daemon in the foreground"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("daemon"))+","+jkv("args", jarr([]string{jstr("start|stop|status"), jstr("--port")}))+","+jkv("summary", jstr("manage the background daemon"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("guide"))+","+jkv("args", jarr([]string{jstr("--human")}))+","+jkv("summary", jstr("the full operator manual"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("version"))+","+jkv("args", jarr([]string{}))+","+jkv("summary", jstr("version string"))+"}")
+	r = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("tool", jstr("linux-use")) + "," + jkv("version", jstr(VERSION)) + "," + jkv("commands", jarr(cmds)) + "}"
+}
+
+// ---------------------------------------------------------------- daemon
+
+var srv_port = 7777
+
+func health_json() (r) {
+	napps := 0
+	if desktop != 0 {
+		napps = atspi_accessible_get_child_count(desktop, 0)
+	}
+	r = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("tool", jstr("linux-use")) + "," + jkv("version", jstr(VERSION)) + "," + jkv("warm", jbool(desktop != 0)) + "," + jkv("applications", str(napps)) + "," + jkv("port", str(srv_port)) + "}"
+}
+
+func lu_route(req) (res) {
+	if req.path == "/_health" {
+		res = ok_json(health_json())
+		return
+	}
+	if req.path == "/_shutdown" {
+		if req.method != "POST" {
+			res = response("405 Method Not Allowed", "application/json", errjson("method_not_allowed", "POST required", true, []string{"use POST /_shutdown"}))
+			return
+		}
+		write(2, "linux-use: shutdown requested\n")
+		res = ok_json("{" + jkv("ok", "true") + "," + jkv("stopping", "true") + "}")
+		flush()
+		exit(0)
+		return
+	}
+	if has_prefix(req.path, "/v1/") {
+		rest := param(req.path, "/v1/")
+		argv := []string{"linux-use"}
+		parts := split(rest, "/")
+		i := 0
+		while i < len(parts) {
+			if len(parts[i]) > 0 {
+				argv = append(argv, replace(parts[i], "%20", " "))
+			}
+			i = i + 1
+		}
+		out, code := run_cmd(argv)
+		if code == EX_OK {
+			res = ok_json(out)
+		} else {
+			res = response("400 Bad Request", "application/json", out)
+		}
+		return
+	}
+	res = response("404 Not Found", "application/json", errjson("not_found", "no such endpoint", true, []string{"GET /_health", "POST /_shutdown", "GET /v1/<command>/<arg>/..."}))
+}
+
+func cmd_serve(port) (out, code) {
+	code = EX_OK
+	out = ""
+	if !a11y_up() {
+		write(2, "linux-use: WARNING starting without an AT-SPI connection\n")
+	}
+	write(2, "linux-use " + VERSION + " serving on 127.0.0.1:" + str(port) + " (warm registry)\n")
+	serve(port, func(req) { return lu_route(req) })
+}
+
+func daemon_health(port) (up, body) {
+	st, b, e := http_get("http://127.0.0.1:" + str(port) + "/_health")
+	up = st == 200 && len(e) == 0
+	body = b
+}
+
+func cmd_daemon(sub, port) (out, code) {
+	code = EX_OK
+	if sub == "status" {
+		up, body := daemon_health(port)
+		if up {
+			out = body
+			return
+		}
+		out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "false") + "," + jkv("running", "false") + "," + jkv("port", str(port)) + "}"
+		return
+	}
+	if sub == "start" {
+		up, body := daemon_health(port)
+		if up {
+			out = body
+			return
+		}
+		self := args()[0]
+		system(self + " serve --port " + str(port) + " >>/tmp/linux-use-daemon.log 2>&1 &")
+		waited := 0
+		while waited < 5000 {
+			sleep(200)
+			waited = waited + 200
+			u2, b2 := daemon_health(port)
+			if u2 {
+				out = b2
+				return
+			}
+		}
+		code = EX_DAEMON
+		out = errjson("daemon_start_failed", "daemon did not become healthy within 5s", true, []string{"check /tmp/linux-use-daemon.log", "try: linux-use serve --port " + str(port) + " (foreground)"})
+		return
+	}
+	if sub == "stop" {
+		up, _ := daemon_health(port)
+		if !up {
+			out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("stopped", "true") + "," + jkv("was_running", "false") + "}"
+			return
+		}
+		_, _, _ = http_request("POST", "http://127.0.0.1:"+str(port)+"/_shutdown", []string{}, "")
+		waited := 0
+		while waited < 3000 {
+			sleep(200)
+			waited = waited + 200
+			u2, _ := daemon_health(port)
+			if !u2 {
+				out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("stopped", "true") + "," + jkv("was_running", "true") + "}"
+				return
+			}
+		}
+		code = EX_DAEMON
+		out = errjson("daemon_stop_failed", "daemon still healthy after shutdown request", true, []string{"kill it manually: pkill -f 'linux-use serve'"})
+		return
+	}
+	code = EX_USAGE
+	out = errjson("bad_subcommand", "daemon takes start|stop|status", true, []string{"linux-use daemon status"})
+}
+
+// ---------------------------------------------------------------- dispatch
+
+func need_a11y() (out, code) {
+	out = ""
+	code = EX_OK
+	if !a11y_up() {
+		code = EX_NO_A11Y
+		out = errjson("no_a11y", "cannot reach the AT-SPI accessibility bus", false, []string{"run: linux-use doctor", "enable it: gsettings set org.gnome.desktop.interface toolkit-accessibility true"})
+	}
+}
+
+func run_cmd(argv) (out, code) {
+	out = ""
+	code = EX_OK
+	if len(argv) < 2 {
+		code = EX_USAGE
+		out = errjson("no_command", "no command given", true, []string{"run: linux-use guide", "or: linux-use help-json"})
+		return
+	}
+	cmd := argv[1]
+	rest := argv[1:len(argv)]
+
+	fs := new_flags("linux-use")
+	fs = flag_str(fs, "app", "a", "", "target application name")
+	fs = flag_str(fs, "role", "r", "", "filter by accessible role")
+	fs = flag_int(fs, "depth", "d", "64", "maximum tree depth")
+	fs = flag_int(fs, "max-nodes", "", "20000", "node budget for a walk")
+	fs = flag_int(fs, "max-events", "", "0", "stop after N events (0 = unlimited)")
+	fs = flag_int(fs, "duration", "", "0", "stop after N ms (0 = unlimited)")
+	fs = flag_str(fs, "events", "e", "", "comma-separated AT-SPI event types")
+	fs = flag_int(fs, "port", "p", "7777", "daemon port")
+	fs = flag_int(fs, "x", "", "-1", "pointer x")
+	fs = flag_int(fs, "y", "", "-1", "pointer y")
+	fs = flag_int(fs, "button", "b", "1", "mouse button")
+	fs = flag_int(fs, "action", "", "0", "action index")
+	fs = flag_int(fs, "timeout", "t", "8000", "timeout in ms")
+	fs = flag_str(fs, "wait-for", "w", "", "app name to wait for after launch")
+	fs = flag_bool(fs, "all", "", "include non-interactive nodes")
+	fs = flag_bool(fs, "replace", "", "replace existing text instead of inserting")
+	fs = flag_bool(fs, "allow-password", "", "permit typing into a password field")
+	fs = flag_bool(fs, "human", "", "human-readable output (guide only)")
+	fs = parse_flags(fs, rest)
+	pos := flag_args(fs)
+
+	wantAll = flag_on(fs, "all")
+	wantRole = flag_get(fs, "role")
+	wantText = ""
+	depth := flag_int_val(fs, "depth")
+	maxnodes := flag_int_val(fs, "max-nodes")
+	port := flag_int_val(fs, "port")
+
+	if cmd == "guide" {
+		if flag_on(fs, "human") {
+			out = guide_human()
+			return
+		}
+		out = guide_json()
+		return
+	}
+	if cmd == "help-json" {
+		out = helpjson()
+		return
+	}
+	if cmd == "version" {
+		out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("tool", jstr("linux-use")) + "," + jkv("version", jstr(VERSION)) + "}"
+		return
+	}
+	if cmd == "doctor" {
+		out, code = cmd_doctor()
+		return
+	}
+	if cmd == "serve" {
+		out, code = cmd_serve(port)
+		return
+	}
+	if cmd == "daemon" {
+		sub := "status"
+		if len(pos) > 0 {
+			sub = pos[0]
+		}
+		out, code = cmd_daemon(sub, port)
+		return
+	}
+	if cmd == "pointer" {
+		out, code = cmd_pointer()
+		return
+	}
+	if cmd == "key" {
+		if len(pos) < 1 {
+			code = EX_USAGE
+			out = errjson("missing_arg", "key needs a combo", true, []string{"example: linux-use key ctrl+shift+t"})
+			return
+		}
+		out, code = cmd_key(pos[0])
+		return
+	}
+
+	// everything below needs the accessibility bus
+	e, c := need_a11y()
+	if c != EX_OK {
+		out = e
+		code = c
+		return
+	}
+
+	if cmd == "apps" {
+		out, code = cmd_apps()
+		return
+	}
+	if cmd == "windows" {
+		out, code = cmd_windows(flag_get(fs, "app"))
+		return
+	}
+	if cmd == "state" {
+		appname := flag_get(fs, "app")
+		if len(appname) == 0 && len(pos) > 0 {
+			appname = pos[0]
+		}
+		if len(appname) == 0 {
+			code = EX_USAGE
+			out = errjson("missing_app", "state needs --app <name>", true, []string{"run: linux-use apps"})
+			return
+		}
+		out, code = cmd_state(appname, depth, maxnodes)
+		return
+	}
+	if cmd == "watch" {
+		out, code = cmd_watch(flag_get(fs, "app"), flag_get(fs, "events"), flag_int_val(fs, "max-events"), flag_int_val(fs, "duration"))
+		return
+	}
+	if cmd == "find" {
+		if len(pos) < 1 {
+			code = EX_USAGE
+			out = errjson("missing_query", "find needs a query string", true, []string{"example: linux-use find Save --app gedit"})
+			return
+		}
+		out, code = cmd_find(pos[0], flag_get(fs, "app"), depth, maxnodes)
+		return
+	}
+	if cmd == "act" {
+		if len(pos) < 1 {
+			code = EX_USAGE
+			out = errjson("missing_ref", "act needs a ref", true, []string{"get one from: linux-use state --app <app>"})
+			return
+		}
+		out, code = cmd_act(pos[0], flag_get(fs, "action"))
+		return
+	}
+	if cmd == "read" {
+		if len(pos) < 1 {
+			code = EX_USAGE
+			out = errjson("missing_ref", "read needs a ref", true, []string{"get one from: linux-use state --app <app>"})
+			return
+		}
+		out, code = cmd_read(pos[0])
+		return
+	}
+	if cmd == "type" {
+		if len(pos) < 2 {
+			code = EX_USAGE
+			out = errjson("missing_arg", "type needs <ref> <text>", true, []string{"example: linux-use type 'gedit:/0/1#123' hello"})
+			return
+		}
+		out, code = cmd_type(pos[0], pos[1], flag_on(fs, "replace"), flag_on(fs, "allow-password"))
+		return
+	}
+	if cmd == "click" {
+		ref := ""
+		if len(pos) > 0 {
+			ref = pos[0]
+		}
+		px := flag_int_val(fs, "x")
+		py := flag_int_val(fs, "y")
+		if len(ref) == 0 && (px < 0 || py < 0) {
+			code = EX_USAGE
+			out = errjson("missing_target", "click needs a <ref> or --x/--y", true, []string{"example: linux-use click --x 100 --y 200"})
+			return
+		}
+		out, code = cmd_click(ref, px, py, flag_int_val(fs, "button"))
+		return
+	}
+	if cmd == "launch" {
+		if len(pos) < 1 {
+			code = EX_USAGE
+			out = errjson("missing_command", "launch needs a command", true, []string{"example: linux-use launch gnome-calculator --wait-for gnome-calculator"})
+			return
+		}
+		out, code = cmd_launch(pos[0], flag_get(fs, "wait-for"), flag_int_val(fs, "timeout"))
+		return
+	}
+
+	code = EX_USAGE
+	out = errjson("unknown_command", "no such command '"+cmd+"'", true, []string{"run: linux-use help-json"})
+}
+
+func main() {
+	out, code := run_cmd(args())
+	if len(out) > 0 {
+		println(out)
+	}
+	exit(code)
+}

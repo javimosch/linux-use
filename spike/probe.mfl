@@ -1,0 +1,5 @@
+extern "c" { header "stdlib.h" fn getenv(string) string }
+
+func main() {
+	println("HOME =", getenv("HOME"))
+}

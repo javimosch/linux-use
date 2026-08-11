@@ -1,0 +1,390 @@
+extern "atspi" {
+	cflags "-I/usr/include/at-spi-2.0 -I/usr/include/dbus-1.0 -I/usr/lib/x86_64-linux-gnu/dbus-1.0/include -I/usr/include/glib-2.0 -I/usr/lib/x86_64-linux-gnu/glib-2.0/include"
+	link "atspi" link "glib-2.0"
+	header "atspi/atspi.h"
+	fn atspi_init() i32
+	fn atspi_get_desktop(i32) ptr
+	fn atspi_accessible_get_child_count(ptr, ptr) i32
+	fn atspi_accessible_get_child_at_index(ptr, i32, ptr) ptr
+	fn atspi_accessible_get_name(ptr, ptr) string
+	fn atspi_accessible_get_role_name(ptr, ptr) string
+	fn atspi_accessible_get_state_set(ptr) ptr
+	fn atspi_state_set_contains(ptr, i32) bool
+	fn atspi_accessible_get_component_iface(ptr) ptr
+	fn atspi_component_get_extents(ptr, i32, ptr) ptr
+	fn atspi_accessible_get_action_iface(ptr) ptr
+	fn atspi_action_get_n_actions(ptr, ptr) i32
+	fn atspi_action_get_action_name(ptr, i32, ptr) string
+	fn atspi_action_do_action(ptr, i32, ptr) bool
+	fn atspi_accessible_get_text_iface(ptr) ptr
+	fn atspi_text_get_character_count(ptr, ptr) i32
+	fn atspi_text_get_text(ptr, i32, i32, ptr) string
+	fn g_free(ptr)
+}
+
+extern "xtst" {
+	link "X11" link "Xtst"
+	header "X11/extensions/XTest.h"
+	fn XOpenDisplay(string) ptr
+	fn XTestFakeMotionEvent(ptr, i32, i32, i32, u64) i32
+	fn XTestFakeButtonEvent(ptr, u32, i32, u64) i32
+	fn XFlush(ptr) i32
+	fn XCloseDisplay(ptr) i32
+	fn XDefaultRootWindow(ptr) u64
+	fn XQueryPointer(ptr, u64, ptr, ptr, ptr, ptr, ptr, ptr, ptr) bool
+	fn XSync(ptr, bool) i32
+}
+
+var rows = []string{}
+
+var budget = 0
+
+func esc(s) (r) {
+	r = ""
+	i := 0
+	while i < len(s) {
+		c := substr(s, i, i+1)
+		if c == "\"" {
+			r = r + "\\\""
+		} else {
+			if c == "\\" {
+				r = r + "\\\\"
+			} else {
+				if c == "\n" {
+					r = r + " "
+				} else {
+					r = r + c
+				}
+			}
+		}
+		i = i + 1
+	}
+	return r
+}
+
+var dumpAll = false
+
+func interesting(role) (b) {
+	if dumpAll {
+		b = true
+		return b
+	}
+	b = role == "push button" || role == "toggle button" || role == "check box" || role == "radio button" || role == "menu item" || role == "check menu item" || role == "radio menu item" || role == "entry" || role == "text" || role == "password text" || role == "combo box" || role == "link" || role == "list item" || role == "page tab" || role == "slider" || role == "menu" || role == "table cell"
+	return b
+}
+
+func showing(node) (b) {
+	ss := atspi_accessible_get_state_set(node)
+	b = false
+	if ss != 0 {
+		b = atspi_state_set_contains(ss, 25)
+	}
+	return b
+}
+
+func walk(node, path, depth, maxdepth) {
+	if budget <= 0 {
+		return
+	}
+	if depth > maxdepth {
+		return
+	}
+	budget = budget - 1
+	role := atspi_accessible_get_role_name(node, 0)
+	name := atspi_accessible_get_name(node, 0)
+	if interesting(role) && showing(node) {
+		x := -1
+		y := -1
+		w := 0
+		h := 0
+		comp := atspi_accessible_get_component_iface(node)
+		if comp != 0 {
+			r := atspi_component_get_extents(comp, 0, 0)
+			if r != 0 {
+				x = peek_i32(r, 0)
+				y = peek_i32(r, 4)
+				w = peek_i32(r, 8)
+				h = peek_i32(r, 12)
+				g_free(r)
+			}
+		}
+		nacts := 0
+		act0 := ""
+		ai := atspi_accessible_get_action_iface(node)
+		if ai != 0 {
+			nacts = atspi_action_get_n_actions(ai, 0)
+			if nacts > 0 {
+				act0 = atspi_action_get_action_name(ai, 0, 0)
+			}
+		}
+		if w > 0 && h > 0 {
+			row := "{\"ref\":\"" + path + "\",\"role\":\"" + esc(role) + "\",\"name\":\"" + esc(name) + "\",\"x\":" + str(x) + ",\"y\":" + str(y) + ",\"w\":" + str(w) + ",\"h\":" + str(h) + ",\"cx\":" + str(x+w/2) + ",\"cy\":" + str(y+h/2) + ",\"actions\":" + str(nacts) + ",\"action0\":\"" + esc(act0) + "\"}"
+			rows = append(rows, row)
+		}
+	}
+	n := atspi_accessible_get_child_count(node, 0)
+	i := 0
+	while i < n {
+		c := atspi_accessible_get_child_at_index(node, i, 0)
+		if c != 0 {
+			walk(c, path+"/"+str(i), depth+1, maxdepth)
+		}
+		i = i + 1
+	}
+}
+
+func findApp(desktop, want) (app) {
+	app = 0
+	n := atspi_accessible_get_child_count(desktop, 0)
+	i := 0
+	while i < n {
+		a := atspi_accessible_get_child_at_index(desktop, i, 0)
+		if a != 0 {
+			nm := atspi_accessible_get_name(a, 0)
+			if nm == want {
+				app = a
+				return app
+			}
+		}
+		i = i + 1
+	}
+	return app
+}
+
+func resolve(app, path) (node) {
+	node = app
+	i := 0
+	cur := ""
+	while i <= len(path) {
+		ch := ""
+		if i < len(path) {
+			ch = substr(path, i, i+1)
+		}
+		if ch == "/" || i == len(path) {
+			if len(cur) > 0 {
+				idx := parse_int(cur)
+				node = atspi_accessible_get_child_at_index(node, idx, 0)
+				if node == 0 {
+					return node
+				}
+				cur = ""
+			}
+		} else {
+			cur = cur + ch
+		}
+		i = i + 1
+	}
+	return node
+}
+
+func cmdApps(desktop) {
+	n := atspi_accessible_get_child_count(desktop, 0)
+	out := "["
+	i := 0
+	first := true
+	while i < n {
+		a := atspi_accessible_get_child_at_index(desktop, i, 0)
+		if a != 0 {
+			nm := atspi_accessible_get_name(a, 0)
+			kids := atspi_accessible_get_child_count(a, 0)
+			if !first {
+				out = out + ","
+			}
+			out = out + "{\"index\":" + str(i) + ",\"name\":\"" + esc(nm) + "\",\"windows\":" + str(kids) + "}"
+			first = false
+		}
+		i = i + 1
+	}
+	println(out + "]")
+}
+
+func cmdState(desktop, want, maxdepth) (code) {
+	app := findApp(desktop, want)
+	if app == 0 {
+		write(2, "error: no application named " + want + "\n")
+		return 80
+	}
+	budget = 4000
+	rows = []string{}
+	t0 := now_ms()
+	walk(app, "", 0, maxdepth)
+	ms := now_ms() - t0
+	out := "{\"app\":\"" + esc(want) + "\",\"elements\":["
+	i := 0
+	while i < len(rows) {
+		if i > 0 {
+			out = out + ","
+		}
+		out = out + rows[i]
+		i = i + 1
+	}
+	out = out + "],\"count\":" + str(len(rows)) + ",\"walk_ms\":" + str(ms) + "}"
+	println(out)
+	code = 0
+	return code
+}
+
+func clickAt(x, y) (ok) {
+	dpy := XOpenDisplay(env("DISPLAY"))
+	ok = false
+	if dpy == 0 {
+		write(2, "error: cannot open X display" + "\n")
+		return ok
+	}
+	XTestFakeMotionEvent(dpy, -1, x, y, 0)
+	XFlush(dpy)
+	sleep(60)
+	XTestFakeButtonEvent(dpy, 1, 1, 0)
+	XTestFakeButtonEvent(dpy, 1, 0, 0)
+	XFlush(dpy)
+	XCloseDisplay(dpy)
+	ok = true
+	return ok
+}
+
+func pointerTest(tx, ty) {
+	dpy := XOpenDisplay(env("DISPLAY"))
+	if dpy == 0 {
+		write(2, "error: cannot open X display\n")
+		return
+	}
+	root := XDefaultRootWindow(dpy)
+	buf := alloc(64)
+	XQueryPointer(dpy, root, buf, buf+8, buf+16, buf+20, buf+24, buf+28, buf+32)
+	ox := peek_i32(buf, 16)
+	oy := peek_i32(buf, 20)
+
+	XTestFakeMotionEvent(dpy, -1, tx, ty, 0)
+	XSync(dpy, false)
+	sleep(80)
+	XQueryPointer(dpy, root, buf, buf+8, buf+16, buf+20, buf+24, buf+28, buf+32)
+	nx := peek_i32(buf, 16)
+	ny := peek_i32(buf, 20)
+
+	XTestFakeMotionEvent(dpy, -1, ox, oy, 0)
+	XSync(dpy, false)
+	sleep(50)
+	XQueryPointer(dpy, root, buf, buf+8, buf+16, buf+20, buf+24, buf+28, buf+32)
+	rx := peek_i32(buf, 16)
+	ry := peek_i32(buf, 20)
+	free(buf)
+	XCloseDisplay(dpy)
+
+	ok := nx == tx && ny == ty
+	println("{\"xtest\":" + str(ok) + ",\"origin\":[" + str(ox) + "," + str(oy) + "],\"requested\":[" + str(tx) + "," + str(ty) + "],\"observed\":[" + str(nx) + "," + str(ny) + "],\"restored\":[" + str(rx) + "," + str(ry) + "]}")
+}
+
+func main() {
+	a := args()
+	if len(a) < 2 {
+		write(2, "usage: spike apps | state <app> [depth] | click <x> <y> | act <app> <ref>" + "\n")
+		return
+	}
+	cmd := a[1]
+
+	if cmd == "pointer" {
+		pointerTest(parse_int(a[2]), parse_int(a[3]))
+		return
+	}
+
+	if cmd == "click" {
+		if len(a) < 4 {
+			write(2, "usage: spike click <x> <y>" + "\n")
+			return
+		}
+		ok := clickAt(parse_int(a[2]), parse_int(a[3]))
+		println("{\"clicked\":" + str(ok) + ",\"x\":" + a[2] + ",\"y\":" + a[3] + "}")
+		return
+	}
+
+	rc := atspi_init()
+	if rc < 0 {
+		write(2, "error: atspi_init failed" + "\n")
+		return
+	}
+	desktop := atspi_get_desktop(0)
+	if desktop == 0 {
+		write(2, "error: no a11y desktop (bus not running?)" + "\n")
+		return
+	}
+
+	if cmd == "apps" {
+		cmdApps(desktop)
+		return
+	}
+
+	if cmd == "dump" {
+		dumpAll = true
+		cmdState(desktop, a[2], 30)
+		return
+	}
+
+	if cmd == "state" {
+		if len(a) < 3 {
+			write(2, "usage: spike state <app> [depth]" + "\n")
+			return
+		}
+		d := 12
+		if len(a) > 3 {
+			d = parse_int(a[3])
+		}
+		cmdState(desktop, a[2], d)
+		return
+	}
+
+	if cmd == "read" {
+		if len(a) < 4 {
+			write(2, "usage: spike read <app> <ref>" + "\n")
+			return
+		}
+		app := findApp(desktop, a[2])
+		if app == 0 {
+			write(2, "error: no application named " + a[2] + "\n")
+			return
+		}
+		node := resolve(app, a[3])
+		if node == 0 {
+			write(2, "error: ref did not resolve: " + a[3] + "\n")
+			return
+		}
+		ti := atspi_accessible_get_text_iface(node)
+		if ti == 0 {
+			println("{\"ok\":false,\"reason\":\"no text interface\"}")
+			return
+		}
+		nc := atspi_text_get_character_count(ti, 0)
+		txt := atspi_text_get_text(ti, 0, nc, 0)
+		println("{\"ok\":true,\"ref\":\"" + a[3] + "\",\"chars\":" + str(nc) + ",\"text\":\"" + esc(txt) + "\"}")
+		return
+	}
+
+	if cmd == "act" {
+		if len(a) < 4 {
+			write(2, "usage: spike act <app> <ref>" + "\n")
+			return
+		}
+		app := findApp(desktop, a[2])
+		if app == 0 {
+			write(2, "error: no application named " + a[2] + "\n")
+			return
+		}
+		node := resolve(app, a[3])
+		if node == 0 {
+			write(2, "error: ref did not resolve: " + a[3] + "\n")
+			return
+		}
+		role := atspi_accessible_get_role_name(node, 0)
+		name := atspi_accessible_get_name(node, 0)
+		ai := atspi_accessible_get_action_iface(node)
+		if ai == 0 {
+			println("{\"ok\":false,\"reason\":\"no action interface\",\"role\":\"" + esc(role) + "\",\"name\":\"" + esc(name) + "\"}")
+			return
+		}
+		an := atspi_action_get_action_name(ai, 0, 0)
+		ok := atspi_action_do_action(ai, 0, 0)
+		println("{\"ok\":" + str(ok) + ",\"ref\":\"" + a[3] + "\",\"role\":\"" + esc(role) + "\",\"name\":\"" + esc(name) + "\",\"action\":\"" + esc(an) + "\"}")
+		return
+	}
+
+	write(2, "error: unknown command " + cmd + "\n")
+}
