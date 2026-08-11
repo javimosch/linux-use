@@ -72,6 +72,7 @@ extern "lu" {
 	fn lu_rule_free(ptr)
 	fn lu_roles_free(ptr)
 	fn lu_role_count() i32
+	fn lu_rss_kb() i32
 }
 
 extern "x11" {
@@ -104,6 +105,7 @@ var EX_ACTION_FAILED = 86
 var EX_NO_DISPLAY = 87
 var EX_DAEMON = 88
 var EX_REFUSED = 89
+var EX_RSS_LIMIT = 90
 
 // AT-SPI enum ordinals (verified against atspi-constants.h on 2.44).
 var ST_ACTIVE = 1
@@ -117,7 +119,7 @@ var ST_VISIBLE = 30
 var COORD_SCREEN = 0
 var KEY_STRING = 4
 
-var VERSION = "0.4.0"
+var VERSION = "0.5.0"
 var SCHEMA = "linux-use/v1"
 
 // ---------------------------------------------------------------- json utils
@@ -1216,6 +1218,7 @@ var wchApp = ""
 var wchRole = ""
 var wchSeen = 0
 var wchMax = 0
+var wchMaxRss = 0
 
 // pathof reconstructs an actionable ref by walking UP from an event source to
 // its application, collecting child indices. Events give us a node, not a path.
@@ -1450,6 +1453,19 @@ func on_event(ev, data) {
 	if wchMax > 0 && wchSeen >= wchMax {
 		atspi_event_quit()
 	}
+	// libatspi's event delivery grows ~0.14 kB per event on at-spi2-core 2.44,
+	// independent of what this callback does (measured with a no-op callback).
+	// It is not ours to fix, so make it BOUNDED: exit cleanly at a ceiling and
+	// let a supervisor restart, rather than growing without limit.
+	if wchMaxRss > 0 {
+		if wchSeen % 64 == 0 {
+			if lu_rss_kb() > wchMaxRss {
+				write(2, "linux-use watch: rss ceiling reached (" + str(lu_rss_kb()) + " kB > " + str(wchMaxRss) + " kB) after " + str(wchSeen) + " events; exiting " + str(EX_RSS_LIMIT) + " for a supervisor to restart\n")
+				flush()
+				exit(EX_RSS_LIMIT)
+			}
+		}
+	}
 }
 
 func default_events() (r) {
@@ -1464,11 +1480,12 @@ func default_events() (r) {
 	r = append(r, "window:destroy")
 }
 
-func cmd_watch(appfilter, rolefilter, evspec, maxev, duration) (out, code) {
+func cmd_watch(appfilter, rolefilter, evspec, maxev, duration, maxrss) (out, code) {
 	code = EX_OK
 	out = ""
 	wchApp = appfilter
 	wchRole = rolefilter
+	wchMaxRss = maxrss
 	wchSeen = 0
 	wchMax = maxev
 
@@ -1502,7 +1519,11 @@ func cmd_watch(appfilter, rolefilter, evspec, maxev, duration) (out, code) {
 		return
 	}
 	// Banner on stderr so stdout stays pure NDJSON.
-	write(2, "linux-use watch: " + str(len(reg)) + " event types registered; NDJSON on stdout\n")
+	banner := "linux-use watch: " + str(len(reg)) + " event types registered; NDJSON on stdout"
+	if wchMaxRss > 0 {
+		banner = banner + "; rss ceiling " + str(wchMaxRss) + " kB (exit " + str(EX_RSS_LIMIT) + ")"
+	}
+	write(2, banner + "\n")
 	if duration > 0 {
 		g_timeout_add(duration, func(d) { atspi_event_quit()  return false }, 0)
 	}
@@ -1542,6 +1563,7 @@ func guide_json() (r) {
 	g = append(g, jstr("state/find run a SERVER-SIDE collection query when you pass --role (measured ~9x faster on a large app: 5ms vs 47ms) and a recursive tree walk otherwise. The `method` field says which ran; force either with --collection / --walk."))
 	g = append(g, jstr("A collection result may contain elements with ref_ok:false — matched, on screen, but their path could not be proven, so no ref is given. They are still listed rather than dropped. Use --walk if you need a ref for every element."))
 	g = append(g, jstr("Valid --role names come from `linux-use roles` (130 of them, 18 interactive by default). An unrecognised role matches nothing and warns on stderr."))
+	g = append(g, jstr("watch's memory grows ~0.14 kB per event — that is libatspi's event delivery on at-spi2-core 2.44, not linux-use (a no-op callback leaks identically). For a long-lived listener pass --max-rss <kB> and restart on exit 90, or bound the run with --duration/--max-events."))
 	g = append(g, jstr("watch takes --role too, which is the cheapest way to cut event noise: filtering to one role took a sample run from 54 events to the 6 that mattered."))
 	g = append(g, jstr("watch emits a ref plus ref_ok. ref_ok:false means the path could not be reconstructed reliably — use the app/role/name fields, do not fabricate a ref."))
 	g = append(g, jstr("For a label whose NAME IS ITS TEXT, the fingerprint changes whenever the text changes, so a ref captured from an event will report ref_stale on the next read. That is the mechanism working: the staleness IS the signal that the content changed. Re-run state, or drop the #fingerprint to address the path alone."))
@@ -1550,7 +1572,7 @@ func guide_json() (r) {
 	c = append(c, jkv("gotchas", jarr(g)))
 
 	e := []string{}
-	e = append(e, jstr("0 ok | 80 usage | 81 no_a11y | 82 app_not_found | 83 ref_stale | 84 ref_not_found | 85 no_capability | 86 action_failed | 87 no_display | 88 daemon | 89 refused"))
+	e = append(e, jstr("0 ok | 80 usage | 81 no_a11y | 82 app_not_found | 83 ref_stale | 84 ref_not_found | 85 no_capability | 86 action_failed | 87 no_display | 88 daemon | 89 refused | 90 rss_limit (watch hit --max-rss; restart it)"))
 	c = append(c, jkv("exit_codes", jarr(e)))
 
 	o := []string{}
@@ -1601,7 +1623,7 @@ func helpjson() (r) {
 	cmds = append(cmds, "{"+jkv("name", jstr("key"))+","+jkv("args", jarr([]string{jstr("<combo>")}))+","+jkv("summary", jstr("send a key combo via XTEST, e.g. ctrl+shift+t"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("click"))+","+jkv("args", jarr([]string{jstr("<ref>"), jstr("--x"), jstr("--y"), jstr("--button")}))+","+jkv("summary", jstr("synthetic pointer click at an element or coordinates"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("launch"))+","+jkv("args", jarr([]string{jstr("<command>"), jstr("--wait-for"), jstr("--timeout")}))+","+jkv("summary", jstr("spawn a program, optionally waiting for it to register"))+"}")
-	cmds = append(cmds, "{"+jkv("name", jstr("watch"))+","+jkv("args", jarr([]string{jstr("--app"), jstr("--events"), jstr("--max-events"), jstr("--duration")}))+","+jkv("summary", jstr("stream AT-SPI events as NDJSON — block on UI change instead of polling"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("watch"))+","+jkv("args", jarr([]string{jstr("--app"), jstr("--role"), jstr("--events"), jstr("--max-events"), jstr("--duration"), jstr("--max-rss")}))+","+jkv("summary", jstr("stream AT-SPI events as NDJSON — block on UI change instead of polling"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("pointer"))+","+jkv("args", jarr([]string{}))+","+jkv("summary", jstr("current pointer position"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("roles"))+","+jkv("args", jarr([]string{}))+","+jkv("summary", jstr("every valid --role name, with which are interactive by default"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("doctor"))+","+jkv("args", jarr([]string{}))+","+jkv("summary", jstr("environment health: session type, a11y bus, XTEST"))+"}")
@@ -1765,6 +1787,7 @@ func run_cmd(argv) (out, code) {
 	fs = flag_int(fs, "max-nodes", "", "20000", "node budget for a walk")
 	fs = flag_int(fs, "max-events", "", "0", "stop after N events (0 = unlimited)")
 	fs = flag_int(fs, "duration", "", "0", "stop after N ms (0 = unlimited)")
+	fs = flag_int(fs, "max-rss", "", "0", "watch: exit 90 above this RSS in kB (0 = unlimited)")
 	fs = flag_str(fs, "events", "e", "", "comma-separated AT-SPI event types")
 	fs = flag_int(fs, "port", "p", "7777", "daemon port")
 	fs = flag_int(fs, "x", "", "-1", "pointer x")
@@ -1887,7 +1910,7 @@ func run_cmd(argv) (out, code) {
 		return
 	}
 	if cmd == "watch" {
-		out, code = cmd_watch(flag_get(fs, "app"), flag_get(fs, "role"), flag_get(fs, "events"), flag_int_val(fs, "max-events"), flag_int_val(fs, "duration"))
+		out, code = cmd_watch(flag_get(fs, "app"), flag_get(fs, "role"), flag_get(fs, "events"), flag_int_val(fs, "max-events"), flag_int_val(fs, "duration"), flag_int_val(fs, "max-rss"))
 		return
 	}
 	if cmd == "find" {

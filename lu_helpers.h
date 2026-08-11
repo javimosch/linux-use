@@ -107,3 +107,16 @@ static inline void lu_rule_free(AtspiMatchRule *r) { if (r) g_object_unref(r); }
 static inline void lu_roles_free(GArray *a) { if (a) g_array_free(a, TRUE); }
 
 static inline int lu_role_count(void) { return ATSPI_ROLE_LAST_DEFINED; }
+
+/* Resident set size in kB, or 0 if unavailable. machin's read_file() returns
+ * empty for procfs (zero-length stat), so this has to be done in C. */
+static inline int lu_rss_kb(void) {
+	FILE *f = fopen("/proc/self/statm", "r");
+	if (!f) return 0;
+	long total = 0, resident = 0;
+	int n = fscanf(f, "%ld %ld", &total, &resident);
+	fclose(f);
+	if (n != 2) return 0;
+	long page_kb = 4096 / 1024;
+	return (int)(resident * page_kb);
+}

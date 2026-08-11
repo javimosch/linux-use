@@ -13,7 +13,7 @@ with no runtime dependencies.
 📦 **[Releases](https://github.com/javimosch/linux-use/releases)** ·
 ✨ **[awesome-machin](https://github.com/javimosch/awesome-machin)**
 
-**v0.4.0** — perception (memoized collection queries + walk fallback), actuation, a
+**v0.5.0** — perception (memoized collection queries + walk fallback), actuation, a
 filterable event stream, and a warm-registry daemon, aligned to [cli-specs.intrane.fr](https://cli-specs.intrane.fr/).
 
 ## The design bet
@@ -71,6 +71,7 @@ key <combo>                   e.g. ctrl+shift+t   (X11 only)
 click <ref> | --x N --y N [--button B]
 launch <cmd> [--wait-for APP] [--timeout MS]
 watch [--app X] [--role R] [--events ...] [--max-events N] [--duration MS]
+      [--max-rss KB]
                               stream AT-SPI events as NDJSON
 roles                         every valid --role name
 pointer                       current pointer position
@@ -141,6 +142,41 @@ entries; `--walk` skips the query entirely. `method` always reports what ran.
 `linux-use roles` lists all 130 role names and flags the 18 interactive by
 default. An unknown `--role` matches nothing and says so on stderr.
 
+## The `watch` memory growth is upstream, and now bounded
+
+`watch` grows about **0.14 kB per event**. v0.5 set out to close it and instead
+proved it is not ours to close.
+
+A probe with three callback bodies — a **no-op that only counts**, one that
+reads role+name, and the full path-reconstructing one — all leak at the same
+rate:
+
+| callback | kB/event |
+|---|---|
+| null (count only) | +0.163 |
+| props (role + name) | +0.157 |
+| full (+ parent climb) | +0.181 |
+
+Every allocation the probe makes lives inside an `arena` block, including its
+own periodic reporting. A callback that does *nothing* still grows, so the
+growth is inside libatspi's event delivery on at-spi2-core 2.44 — not in
+linux-use. (The historical `AtspiEventListener` leak was fixed upstream in
+2.21.1; this is a separate residual.) `atspi_accessible_clear_cache()` makes it
+*worse*: +0.886 kB/event and roughly half the event throughput.
+
+So the fix is to make it **bounded** rather than pretend it is closed:
+
+```sh
+# exit 90 above the ceiling; a supervisor restarts and keeps streaming
+while :; do
+  linux-use watch --app firefox --max-rss 262144 || [ $? -eq 90 ] || break
+done
+```
+
+`--max-rss` is off by default. At 0.14 kB/event a 256 MB ceiling is roughly
+1.8 million events, so most agent workloads never reach it — bound short runs
+with `--duration`/`--max-events` instead and this never comes up.
+
 ## Depth: shallow answers are now loud
 
 v0.1 defaulted to `--depth 14` and silently returned a shallow tree.
@@ -190,7 +226,7 @@ by doing it.
 
 Exit codes: `0` ok · `80` usage · `81` no_a11y · `82` app_not_found ·
 `83` ref_stale · `84` ref_not_found · `85` no_capability · `86` action_failed ·
-`87` no_display · `88` daemon · `89` refused.
+`87` no_display · `88` daemon · `89` refused · `90` rss_limit.
 
 ## Verified (Ubuntu 22.04, GNOME 42.9, X11 — v0.2 on an isolated Xvfb desktop)
 
@@ -279,17 +315,16 @@ These cost real debugging time and are the non-obvious part of this codebase.
   `truncated:true`/`depth_limited:true` rather than silently capping.
 - `watch` cannot yet dedupe repeated events; a chatty app produces a lot of
   lines. Filter with `--role`/`--events` and bound with `--max-events`/`--duration`.
-- `watch` still grows ~0.17 kB per event (down from ~17 kB before the arena
-  fix, but not zero). A million events would cost roughly 190 MB, so long-lived
-  listeners should be bounded and restarted rather than run indefinitely.
+- `watch` grows ~0.14 kB per event inside **libatspi**, not linux-use (proven
+  with a no-op callback; see above). Bound long-lived listeners with
+  `--max-rss` and restart on exit 90.
 
-## Next (v0.5)
+## Next (v0.6)
 
-1. Close the residual ~0.17 kB/event growth in `watch`.
-2. Path the matches that gnome-control-center cannot resolve, so the
+1. Path the matches that gnome-control-center cannot resolve, so the
    `collection+walk` fallback becomes unnecessary.
-3. Consecutive-event dedupe in `watch`.
-4. Injector backend abstraction (`xtest | uinput | libei | portal`) so Wayland
+2. Consecutive-event dedupe in `watch`.
+3. Injector backend abstraction (`xtest | uinput | libei | portal`) so Wayland
    becomes a backend rather than a rewrite.
 4. The remaining three specs: update, feedback, telemetry.
 5. Screenshots + a vision fallback for the apps that expose no tree.

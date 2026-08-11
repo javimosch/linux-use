@@ -42,7 +42,7 @@
             </div>
             <div>
               <h3 class="text-xl font-semibold text-white mb-2">Wait for the UI instead of polling it</h3>
-              <p class="text-white/40 leading-relaxed">The <code>watch</code> command streams real AT-SPI events as newline-delimited JSON, one line per event, with a resolved element reference. Filter by app, by role, or by event type; stop after exactly N events or after a time limit. Filtering to a single role took one sample run from 54 events down to the 6 that mattered.</p>
+              <p class="text-white/40 leading-relaxed">The <code>watch</code> command streams real AT-SPI events as newline-delimited JSON, one line per event, with a resolved element reference. Filter by app, by role, or by event type; stop after exactly N events, after a time limit, or above a memory ceiling. Filtering to a single role took one sample run from 54 events down to the 6 that mattered.</p>
             </div>
           </div>
         </div>
