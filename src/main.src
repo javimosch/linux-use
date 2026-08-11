@@ -1132,6 +1132,27 @@ func keysym_for(tok) (name) {
 	}
 }
 
+// cmd_sendtext types a literal string at whatever currently has focus, via the
+// a11y registry's device-event controller. Unlike `type` it needs no ref, so
+// it works on apps that expose no accessibility tree at all (an Electron/PWA
+// window whose browser process started before the a11y bus, say). The trade-off
+// is that it types wherever focus happens to be — verify focus first.
+func cmd_sendtext(text) (out, code) {
+	code = EX_OK
+	if len(text) == 0 {
+		code = EX_USAGE
+		out = errjson("missing_text", "sendtext needs a string", true, []string{"example: linux-use sendtext 'hello'"})
+		return
+	}
+	ok := atspi_generate_keyboard_event(0, text, KEY_STRING, 0)
+	if !ok {
+		code = EX_ACTION_FAILED
+		out = errjson("sendtext_failed", "the a11y registry refused to synthesize the string", true, []string{"check: linux-use doctor"})
+		return
+	}
+	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("chars", str(len(text))) + "," + jkv("method", jstr("keyboard.string")) + "}"
+}
+
 func cmd_key(combo) (out, code) {
 	code = EX_OK
 	dpy := xopen()
@@ -1765,6 +1786,7 @@ func helpjson() (r) {
 	cmds = append(cmds, "{"+jkv("name", jstr("act"))+","+jkv("args", jarr([]string{jstr("<ref>"), jstr("--action N")}))+","+jkv("summary", jstr("invoke the element's accessible action (preferred)"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("read"))+","+jkv("args", jarr([]string{jstr("<ref>")}))+","+jkv("summary", jstr("read an element's text, name and description"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("type"))+","+jkv("args", jarr([]string{jstr("<ref>"), jstr("<text>"), jstr("--replace"), jstr("--allow-password")}))+","+jkv("summary", jstr("insert text via the editable-text interface"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("sendtext"))+","+jkv("args", jarr([]string{jstr("<text>")}))+","+jkv("summary", jstr("type a literal string at the current focus (no ref; works without a11y)"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("key"))+","+jkv("args", jarr([]string{jstr("<combo>")}))+","+jkv("summary", jstr("send a key combo via XTEST, e.g. ctrl+shift+t"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("click"))+","+jkv("args", jarr([]string{jstr("<ref>"), jstr("--x"), jstr("--y"), jstr("--button")}))+","+jkv("summary", jstr("synthetic pointer click at an element or coordinates"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("launch"))+","+jkv("args", jarr([]string{jstr("<command>"), jstr("--wait-for"), jstr("--timeout")}))+","+jkv("summary", jstr("spawn a program, optionally waiting for it to register"))+"}")
@@ -2013,6 +2035,20 @@ func run_cmd(argv) (out, code) {
 	}
 	if cmd == "pointer" {
 		out, code = cmd_pointer()
+		return
+	}
+	if cmd == "sendtext" {
+		e2, c2 := need_a11y()
+		if c2 != EX_OK {
+			out = e2
+			code = c2
+			return
+		}
+		t := ""
+		if len(pos) > 0 {
+			t = pos[0]
+		}
+		out, code = cmd_sendtext(t)
 		return
 	}
 	if cmd == "key" {
