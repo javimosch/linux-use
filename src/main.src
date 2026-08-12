@@ -121,7 +121,7 @@ var ST_VISIBLE = 30
 var COORD_SCREEN = 0
 var KEY_STRING = 4
 
-var VERSION = "0.6.2"
+var VERSION = "0.6.3"
 var SCHEMA = "linux-use/v1"
 
 // ---------------------------------------------------------------- json utils
@@ -1094,76 +1094,174 @@ func xopen() (dpy) {
 	dpy = XOpenDisplay(env("DISPLAY"))
 }
 
-func keysym_for(tok) (name) {
-	name = tok
+func keysym_alias(tok) (name, found) {
+	name = ""
+	found = true
 	if tok == "ctrl" || tok == "control" {
 		name = "Control_L"
+	} else {
+		if tok == "shift" {
+			name = "Shift_L"
+		} else {
+			if tok == "alt" {
+				name = "Alt_L"
+			} else {
+				if tok == "altgr" {
+					name = "ISO_Level3_Shift"
+				} else {
+					if tok == "super" || tok == "meta" || tok == "cmd" || tok == "win" {
+						name = "Super_L"
+					} else {
+						if tok == "enter" || tok == "return" {
+							name = "Return"
+						} else {
+							if tok == "esc" || tok == "escape" {
+								name = "Escape"
+							} else {
+								if tok == "tab" {
+									name = "Tab"
+								} else {
+									if tok == "space" {
+										name = "space"
+									} else {
+										if tok == "backspace" {
+											name = "BackSpace"
+										} else {
+											if tok == "delete" || tok == "del" {
+												name = "Delete"
+											} else {
+												if tok == "insert" || tok == "ins" {
+													name = "Insert"
+												} else {
+													name = keysym_alias2(tok)
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
 	}
-	if tok == "shift" {
-		name = "Shift_L"
-	}
-	if tok == "alt" {
-		name = "Alt_L"
-	}
-	if tok == "super" || tok == "meta" || tok == "cmd" {
-		name = "Super_L"
-	}
-	if tok == "enter" || tok == "return" {
-		name = "Return"
-	}
-	if tok == "esc" || tok == "escape" {
-		name = "Escape"
-	}
-	if tok == "tab" {
-		name = "Tab"
-	}
-	if tok == "space" {
-		name = "space"
-	}
-	if tok == "backspace" {
-		name = "BackSpace"
-	}
-	if tok == "delete" || tok == "del" {
-		name = "Delete"
-	}
-	if tok == "up" {
-		name = "Up"
-	}
-	if tok == "down" {
-		name = "Down"
-	}
-	if tok == "left" {
-		name = "Left"
-	}
-	if tok == "right" {
-		name = "Right"
-	}
-	if tok == "home" {
-		name = "Home"
-	}
-	if tok == "end" {
-		name = "End"
-	}
-	if tok == "pageup" {
-		name = "Prior"
-	}
-	if tok == "pagedown" {
-		name = "Next"
+	if len(name) == 0 {
+		found = false
 	}
 }
 
-// cmd_sendtext types a literal string at whatever currently has focus, via the
-// a11y registry's device-event controller. Unlike `type` it needs no ref, so
-// it works on apps that expose no accessibility tree at all (an Electron/PWA
-// window whose browser process started before the a11y bus, say). The trade-off
-// is that it types wherever focus happens to be — verify focus first.
-// cmd_sendtext types at the current focus. `via` selects the mechanism:
-//   ""/"auto"   clipboard when xclip is present, else AT-SPI with a warning
-//   "clipboard" clipboard + ctrl+v (safe everywhere)
-//   "atspi"     atspi_generate_keyboard_event — CRASHES a11y-forced Chromium
-// The default changed in 0.6.2: AT-SPI key synthesis kills any Chromium
-// launched with --force-renderer-accessibility (issue #4), which is exactly the
-// configuration needed to drive a web app, so it can no longer be the default.
+// keysym_alias2 is the tail of the alias table, split out only because MFL has
+// no switch and the nesting would otherwise get silly.
+func keysym_alias2(tok) (name) {
+	name = ""
+	if tok == "up" {
+		name = "Up"
+		return
+	}
+	if tok == "down" {
+		name = "Down"
+		return
+	}
+	if tok == "left" {
+		name = "Left"
+		return
+	}
+	if tok == "right" {
+		name = "Right"
+		return
+	}
+	if tok == "home" {
+		name = "Home"
+		return
+	}
+	if tok == "end" {
+		name = "End"
+		return
+	}
+	if tok == "pageup" || tok == "pgup" {
+		name = "Prior"
+		return
+	}
+	if tok == "pagedown" || tok == "pgdn" {
+		name = "Next"
+		return
+	}
+	if tok == "printscreen" || tok == "prtsc" || tok == "print" {
+		name = "Print"
+		return
+	}
+	if tok == "menu" {
+		name = "Menu"
+		return
+	}
+	if tok == "pause" {
+		name = "Pause"
+		return
+	}
+	if tok == "capslock" {
+		name = "Caps_Lock"
+		return
+	}
+	if tok == "numlock" {
+		name = "Num_Lock"
+		return
+	}
+	if tok == "scrolllock" || tok == "scroll_lock" {
+		name = "Scroll_Lock"
+		return
+	}
+	// f1..f24 in either case: the X keysyms are F1..F24
+	if len(tok) >= 2 && len(tok) <= 3 {
+		if charat(tok, 0) == "f" {
+			n := parse_int(substr(tok, 1, len(tok)))
+			if n >= 1 && n <= 24 {
+				name = "F" + str(n)
+			}
+		}
+	}
+}
+
+// capitalise upper-cases the first character only, turning "print" into "Print"
+// and "f4" into "F4" — the shape most X keysym names take.
+func capitalise(t) (r) {
+	r = t
+	if len(t) == 0 {
+		return
+	}
+	r = to_upper(substr(t, 0, 1)) + substr(t, 1, len(t))
+}
+
+// resolve_keysym tries, in order: the alias table (case-insensitive), the token
+// EXACTLY as written, then the token capitalised. X keysym names are
+// CASE-SENSITIVE, so lowercasing the whole combo before lookup — as this used
+// to do — made every capitalised name ("F4", "Print", "Menu") unresolvable.
+func resolve_keysym(tok) (name, ks) {
+	name = ""
+	ks = 0
+	alias, found := keysym_alias(to_lower(tok))
+	if found {
+		ks = XStringToKeysym(alias)
+		if ks != 0 {
+			name = alias
+			return
+		}
+	}
+	ks = XStringToKeysym(tok)
+	if ks != 0 {
+		name = tok
+		return
+	}
+	cap := capitalise(tok)
+	ks = XStringToKeysym(cap)
+	if ks != 0 {
+		name = cap
+		return
+	}
+	name = tok
+	ks = 0
+}
+
 func cmd_sendtext(text, via) (out, code) {
 	code = EX_OK
 	if len(text) == 0 {
@@ -1293,7 +1391,7 @@ func cmd_paste(text, restore) (out, code) {
 	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("chars", str(len(text))) + "," + jkv("method", jstr("clipboard+ctrl_v")) + "," + jkv("clipboard_restored", jbool(restored)) + "}"
 }
 
-func cmd_key(combo) (out, code) {
+func cmd_key(combo, dryrun) (out, code) {
 	code = EX_OK
 	dpy := xopen()
 	if dpy == 0 {
@@ -1301,19 +1399,18 @@ func cmd_key(combo) (out, code) {
 		out = errjson("no_display", "cannot open X display '"+env("DISPLAY")+"'", false, []string{"this build injects input via XTEST and needs an X11 session", "run: linux-use doctor"})
 		return
 	}
-	toks := split(to_lower(combo), "+")
+	toks := split(combo, "+")
 	codes := []int{}
 	resolved := []string{}
 	i := 0
 	while i < len(toks) {
 		t := trim(toks[i])
 		if len(t) > 0 {
-			nm := keysym_for(t)
-			ks := XStringToKeysym(nm)
+			nm, ks := resolve_keysym(t)
 			if ks == 0 {
 				XCloseDisplay(dpy)
 				code = EX_USAGE
-				out = errjson("unknown_key", "'"+t+"' is not a known key name", true, []string{"use X keysym names, e.g. ctrl+shift+t, Return, F5, Escape"})
+				out = errjson("unknown_key", "'"+t+"' is not a known key name", true, []string{"keysym names are CASE-SENSITIVE: F4 not f4 (f1-f12 are accepted either way)", "aliases: ctrl shift alt super enter esc tab space backspace delete insert up down left right home end pageup pagedown print menu pause", "list every valid name with: xmodmap -pke"})
 				return
 			}
 			kc := XKeysymToKeycode(dpy, ks)
@@ -1332,6 +1429,17 @@ func cmd_key(combo) (out, code) {
 		XCloseDisplay(dpy)
 		code = EX_USAGE
 		out = errjson("empty_combo", "no keys given", true, []string{"example: linux-use key ctrl+shift+t"})
+		return
+	}
+	if dryrun {
+		XCloseDisplay(dpy)
+		q := []string{}
+		i = 0
+		while i < len(resolved) {
+			q = append(q, jstr(resolved[i]))
+			i = i + 1
+		}
+		out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("combo", jstr(combo)) + "," + jkv("keys", jarr(q)) + "," + jkv("sent", "false") + "}"
 		return
 	}
 	i = 0
@@ -1878,6 +1986,7 @@ func guide_json() (r) {
 	g = append(g, jstr("CHROMIUM CRASH (issue #4): AT-SPI key synthesis CRASHES Chromium/Edge launched with --force-renderer-accessibility — reproduced on a bare input page with focus verified. Since 0.6.2 text entry therefore goes through the CLIPBOARD by default (set CLIPBOARD, send ctrl+v via XTEST): 'paste', 'sendtext' and the 'type' fallback are all safe out of the box. 'sendtext --via atspi' opts back into the crashing path deliberately; 'linux-use doctor' reports which backend is actually in use."))
 	g = append(g, jstr("SAFETY: 'type <ref>' now verifies the element actually took focus before synthesizing keystrokes, and fails with focus_refused rather than typing into an unknown target. 'sendtext' does NOT — it types wherever focus is, by design, so confirm focus yourself (check focused:true in state) before using it. A stray space presses whatever button is focused."))
 	g = append(g, jstr("'type' uses the editable-text interface when available (deterministic, no focus needed) and falls back to synthesized keystrokes. It REFUSES password fields unless --allow-password."))
+	g = append(g, jstr("X keysym names are CASE-SENSITIVE: 'F4' resolves and plain 'f4' would not — except f1-f12 are accepted in either case, alongside aliases (ctrl shift alt super enter esc tab space backspace delete insert up down left right home end pageup pagedown print menu pause). Check a combo without firing it: 'linux-use key alt+F4 --dry-run'."))
 	g = append(g, jstr("'key' needs X11: it maps keysyms through the active keyboard layout via XTEST. On Wayland it will fail — use 'act' instead."))
 	g = append(g, jstr("state/find run a SERVER-SIDE collection query when you pass --role (measured ~9x faster on a large app: 5ms vs 47ms) and a recursive tree walk otherwise. The `method` field says which ran; force either with --collection / --walk."))
 	g = append(g, jstr("A collection result may contain elements with ref_ok:false — matched, on screen, but their path could not be proven, so no ref is given. They are still listed rather than dropped. Use --walk if you need a ref for every element."))
@@ -1941,7 +2050,7 @@ func helpjson() (r) {
 	cmds = append(cmds, "{"+jkv("name", jstr("type"))+","+jkv("args", jarr([]string{jstr("<ref>"), jstr("<text>"), jstr("--replace"), jstr("--allow-password")}))+","+jkv("summary", jstr("insert text via the editable-text interface"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("paste"))+","+jkv("args", jarr([]string{jstr("<text>"), jstr("--no-restore")}))+","+jkv("summary", jstr("put text on the clipboard and ctrl+v it — the safe way to type into Chromium"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("sendtext"))+","+jkv("args", jarr([]string{jstr("<text>"), jstr("--via auto|clipboard|atspi")}))+","+jkv("summary", jstr("type a literal string at the current focus (no ref; works without a11y)"))+"}")
-	cmds = append(cmds, "{"+jkv("name", jstr("key"))+","+jkv("args", jarr([]string{jstr("<combo>")}))+","+jkv("summary", jstr("send a key combo via XTEST, e.g. ctrl+shift+t"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("key"))+","+jkv("args", jarr([]string{jstr("<combo>"), jstr("--dry-run")}))+","+jkv("summary", jstr("send a key combo via XTEST, e.g. ctrl+shift+t"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("click"))+","+jkv("args", jarr([]string{jstr("<ref>"), jstr("--x"), jstr("--y"), jstr("--button")}))+","+jkv("summary", jstr("synthetic pointer click at an element or coordinates"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("launch"))+","+jkv("args", jarr([]string{jstr("<command>"), jstr("--wait-for"), jstr("--timeout")}))+","+jkv("summary", jstr("spawn a program, optionally waiting for it to register"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("watch"))+","+jkv("args", jarr([]string{jstr("--app"), jstr("--role"), jstr("--events"), jstr("--max-events"), jstr("--duration"), jstr("--max-rss")}))+","+jkv("summary", jstr("stream AT-SPI events as NDJSON — block on UI change instead of polling"))+"}")
@@ -2119,6 +2228,7 @@ func run_cmd(argv) (out, code) {
 	fs = flag_int(fs, "timeout", "t", "8000", "timeout in ms")
 	fs = flag_str(fs, "wait-for", "w", "", "app name to wait for after launch")
 	fs = flag_bool(fs, "all", "", "include non-interactive nodes")
+	fs = flag_bool(fs, "dry-run", "", "key: resolve the combo without sending it")
 	fs = flag_bool(fs, "no-restore", "", "paste: do not restore the previous clipboard")
 	fs = flag_bool(fs, "walk", "", "force the recursive tree walk")
 	fs = flag_bool(fs, "collection", "", "force a server-side collection query")
@@ -2221,7 +2331,7 @@ func run_cmd(argv) (out, code) {
 			out = errjson("missing_arg", "key needs a combo", true, []string{"example: linux-use key ctrl+shift+t"})
 			return
 		}
-		out, code = cmd_key(pos[0])
+		out, code = cmd_key(pos[0], flag_on(fs, "dry-run"))
 		return
 	}
 
