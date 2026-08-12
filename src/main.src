@@ -37,6 +37,8 @@ extern "atspi" {
 	fn atspi_accessible_get_parent(ptr, ptr) ptr
 	fn atspi_accessible_get_index_in_parent(ptr, ptr) i32
 	fn atspi_accessible_get_id(ptr, ptr) i32
+	fn atspi_accessible_get_process_id(ptr, ptr) u32
+	fn atspi_accessible_get_toolkit_name(ptr, ptr) ptr
 	fn atspi_role_get_name(i32) ptr
 	fn atspi_event_listener_new(cb(ptr, ptr), ptr, ptr) ptr
 	fn atspi_event_listener_register(ptr, string, ptr) bool
@@ -312,6 +314,8 @@ func resolve_geom(app, spec) (node, found) {
 // ---------------------------------------------------------------- atspi core
 
 var desktop = 0
+var wantPid = 0
+var appAmbiguous = 0
 
 func a11y_up() (ok) {
 	ok = false
@@ -369,21 +373,71 @@ func hasstate(node, st) (b) {
 	}
 }
 
-// findapp returns a NEW ref to the application, or 0. Caller unrefs.
+// app_matches reports whether an application satisfies a --app/--pid filter,
+// honouring the "<name>#pid<PID>" form so windows/find filter the same way
+// findapp resolves.
+func app_matches(a, nm, filter) (b) {
+	sel := filter
+	pid := wantPid
+	hp := split(filter, "#pid")
+	if len(hp) == 2 {
+		sel = hp[0]
+		pid = parse_int(hp[1])
+	}
+	b = len(sel) == 0 || nm == sel
+	if b && pid > 0 {
+		b = atspi_accessible_get_process_id(a, 0) == pid
+	}
+}
+
+// findapp resolves an application selector to a NEW ref (caller unrefs), or 0.
+//
+// The selector is either a plain accessible name, or "<name>#pid<PID>" to
+// disambiguate when two processes publish the same name (two browser windows
+// of different profiles both call themselves "Microsoft Edge"). `wantPid` set
+// non-zero has the same effect and wins.
+//
+// A plain name matching MORE THAN ONE application is REFUSED (appAmbiguous is
+// set and 0 returned) rather than silently resolving to whichever comes first
+// in the desktop's child list — picking one at random is exactly the kind of
+// confident wrong answer this tool refuses to give.
 func findapp(want) (app) {
 	app = 0
+	appAmbiguous = 0
+	sel := want
+	pid := wantPid
+	hp := split(want, "#pid")
+	if len(hp) == 2 {
+		sel = hp[0]
+		pid = parse_int(hp[1])
+	}
+	matches := 0
 	n := atspi_accessible_get_child_count(desktop, 0)
 	i := 0
 	while i < n {
 		a := atspi_accessible_get_child_at_index(desktop, i, 0)
 		if a != 0 {
-			if nodename(a) == want {
-				app = a
-				return
+			hit := nodename(a) == sel
+			if hit && pid > 0 {
+				hit = atspi_accessible_get_process_id(a, 0) == pid
 			}
-			g_object_unref(a)
+			if hit {
+				matches = matches + 1
+				if app == 0 {
+					app = a
+				} else {
+					g_object_unref(a)
+				}
+			} else {
+				g_object_unref(a)
+			}
 		}
 		i = i + 1
+	}
+	if matches > 1 {
+		appAmbiguous = matches
+		g_object_unref(app)
+		app = 0
 	}
 }
 
@@ -704,6 +758,8 @@ func walk(appname, node, path, depth, maxdepth) {
 func cmd_apps() (out, code) {
 	code = EX_OK
 	items := []string{}
+	names := []string{}
+	dupes := []string{}
 	n := atspi_accessible_get_child_count(desktop, 0)
 	i := 0
 	while i < n {
@@ -711,12 +767,43 @@ func cmd_apps() (out, code) {
 		if a != 0 {
 			nm := nodename(a)
 			kids := atspi_accessible_get_child_count(a, 0)
-			items = append(items, "{"+jkv("name", jstr(nm))+","+jkv("windows", str(kids))+"}")
+			pid := atspi_accessible_get_process_id(a, 0)
+			tk := takestr(atspi_accessible_get_toolkit_name(a, 0))
+			// A name shared by two applications is ambiguous for --app, so say
+			// so rather than letting the caller silently address the wrong one.
+			j := 0
+			while j < len(names) {
+				if names[j] == nm {
+					seen := false
+					k := 0
+					while k < len(dupes) {
+						if dupes[k] == nm {
+							seen = true
+						}
+						k = k + 1
+					}
+					if !seen {
+						dupes = append(dupes, nm)
+					}
+				}
+				j = j + 1
+			}
+			names = append(names, nm)
+			items = append(items, "{"+jkv("name", jstr(nm))+","+jkv("pid", str(pid))+","+jkv("toolkit", jstr(tk))+","+jkv("windows", str(kids))+","+jkv("ref", jstr(nm+"#pid"+str(pid)))+"}")
 			g_object_unref(a)
 		}
 		i = i + 1
 	}
-	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("applications", jarr(items)) + "," + jkv("count", str(len(items))) + "}"
+	dj := []string{}
+	i = 0
+	while i < len(dupes) {
+		dj = append(dj, jstr(dupes[i]))
+		i = i + 1
+	}
+	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("applications", jarr(items)) + "," + jkv("count", str(len(items))) + "," + jkv("ambiguous_names", jarr(dj)) + "}"
+	if len(dupes) > 0 {
+		write(2, "warning: " + str(len(dupes)) + " application name(s) are shared by more than one process; address them as '<name>#pid<PID>' or with --pid\n")
+	}
 }
 
 func cmd_windows(appfilter) (out, code) {
@@ -728,7 +815,7 @@ func cmd_windows(appfilter) (out, code) {
 		a := atspi_accessible_get_child_at_index(desktop, i, 0)
 		if a != 0 {
 			nm := nodename(a)
-			if len(appfilter) == 0 || nm == appfilter {
+			if app_matches(a, nm, appfilter) {
 				wc := atspi_accessible_get_child_count(a, 0)
 				j := 0
 				while j < wc {
@@ -765,6 +852,11 @@ func cmd_state(appname, maxdepth, maxnodes) (out, code) {
 	out = ""
 	app := findapp(appname)
 	if app == 0 {
+		if appAmbiguous > 1 {
+			code = EX_USAGE
+			out = errjson("app_ambiguous", str(appAmbiguous)+" applications are named '"+appname+"'", true, []string{"disambiguate with the pid: --app '" + appname + "#pid<PID>' or --pid <PID>", "list pids with: linux-use apps"})
+			return
+		}
 		code = EX_APP_NOT_FOUND
 		out = errjson("app_not_found", "no application named '"+appname+"' in the accessibility tree", true, []string{"run: linux-use apps", "the app may not be running, or may not export accessibility (see: linux-use doctor)"})
 		return
@@ -847,7 +939,7 @@ func cmd_find(query, appfilter, maxdepth, maxnodes) (out, code) {
 		a := atspi_accessible_get_child_at_index(desktop, i, 0)
 		if a != 0 {
 			nm := nodename(a)
-			if len(appfilter) == 0 || nm == appfilter {
+			if app_matches(a, nm, appfilter) {
 				rows = []string{}
 				budget = maxnodes
 				cok := false
@@ -909,6 +1001,11 @@ func getnode(ref) (node, out, code) {
 	}
 	app := findapp(appname)
 	if app == 0 {
+		if appAmbiguous > 1 {
+			code = EX_USAGE
+			out = errjson("app_ambiguous", str(appAmbiguous)+" applications are named '"+appname+"'", true, []string{"disambiguate with the pid: '" + appname + "#pid<PID>'", "list pids with: linux-use apps"})
+			return
+		}
 		code = EX_APP_NOT_FOUND
 		out = errjson("app_not_found", "no application named '"+appname+"'", true, []string{"run: linux-use apps"})
 		return
@@ -1965,6 +2062,7 @@ func guide_json() (r) {
 	m := []string{}
 	m = append(m, jstr("Every GUI app publishes a tree of widgets over AT-SPI2. linux-use reads that tree and acts on it. You do NOT need screenshots or pixel coordinates for most work."))
 	m = append(m, jstr("An element ref looks like 'gnome-calculator:/0/1/0/3#824713' — application name, child-index path, and a fingerprint of role+name. Pass refs back verbatim; never construct or edit one by hand."))
+	m = append(m, jstr("Two applications can publish the SAME accessible name (two browser profiles both called \"Microsoft Edge\"). A plain --app matching more than one is REFUSED with app_ambiguous rather than picking one; disambiguate with --app 'Name#pid1234' or --pid 1234. 'linux-use apps' lists each pid and flags ambiguous_names."))
 	m = append(m, jstr("A ref comes in two kinds, and ref_kind says which. A PATH ref (app:/0/1/2#fp) addresses a node by child indices. A GEOMETRY ref (app:@<roleId>~x,y,w,h#fp) addresses it by role and on-screen rectangle, and is issued when a node has no provable path — some toolkits report a parent that does not list the node among its children, so climbing to it is impossible, not merely unknown. Both are used identically: pass them back verbatim."))
 	m = append(m, jstr("A geometry ref is tied to screen position, so moving or resizing the window invalidates it — you get exit 84, never a silent hit on the wrong widget. If two widgets share a role and rectangle the ref is refused as ambiguous rather than guessed."))
 	m = append(m, jstr("Refs go stale when the UI changes. That is DETECTED, not silently ignored: you get exit 83 ref_stale. The fix is always to re-run 'state' and use fresh refs."))
@@ -2041,7 +2139,7 @@ func guide_human() (r) {
 
 func helpjson() (r) {
 	cmds := []string{}
-	cmds = append(cmds, "{"+jkv("name", jstr("apps"))+","+jkv("args", jarr([]string{}))+","+jkv("summary", jstr("list applications exposing accessibility"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("apps"))+","+jkv("args", jarr([]string{}))+","+jkv("summary", jstr("list applications with pid, toolkit and window count; flags ambiguous names"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("windows"))+","+jkv("args", jarr([]string{jstr("--app")}))+","+jkv("summary", jstr("list top-level windows with geometry and active state"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("state"))+","+jkv("args", jarr([]string{jstr("--app (required)"), jstr("--depth"), jstr("--role"), jstr("--all")}))+","+jkv("summary", jstr("interactive elements of an app, with refs"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("find"))+","+jkv("args", jarr([]string{jstr("<query>"), jstr("--app"), jstr("--role"), jstr("--depth")}))+","+jkv("summary", jstr("search elements by name substring"))+"}")
@@ -2221,6 +2319,7 @@ func run_cmd(argv) (out, code) {
 	fs = flag_str(fs, "events", "e", "", "comma-separated AT-SPI event types")
 	fs = flag_str(fs, "via", "", "", "sendtext mechanism: auto|clipboard|atspi")
 	fs = flag_int(fs, "port", "p", "7777", "daemon port")
+	fs = flag_int(fs, "pid", "", "0", "disambiguate --app by process id")
 	fs = flag_int(fs, "x", "", "-1", "pointer x")
 	fs = flag_int(fs, "y", "", "-1", "pointer y")
 	fs = flag_int(fs, "button", "b", "1", "mouse button")
@@ -2255,6 +2354,7 @@ func run_cmd(argv) (out, code) {
 	wantText = ""
 	depth := flag_int_val(fs, "depth")
 	maxnodes := flag_int_val(fs, "max-nodes")
+	wantPid = flag_int_val(fs, "pid")
 	port := flag_int_val(fs, "port")
 
 	if cmd == "guide" {

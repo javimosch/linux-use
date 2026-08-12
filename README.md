@@ -6,14 +6,14 @@
 
 Agent-first, CLI-first GUI control for Linux desktops — the Linux answer to
 [Windows-Use](https://github.com/Jeomon/Windows-Use), built in
-[machin (MFL)](https://github.com/javimosch/machin) as a single 175 KB binary
+[machin (MFL)](https://github.com/javimosch/machin) as a single 179 KB binary
 with no runtime dependencies.
 
 📖 **[Docs & changelog](https://javimosch.github.io/linux-use/)** ·
 📦 **[Releases](https://github.com/javimosch/linux-use/releases)** ·
 ✨ **[awesome-machin](https://github.com/javimosch/awesome-machin)**
 
-**v0.6.2** — perception (memoized collection queries + walk fallback), actuation, a
+**v0.6.3** — perception (memoized collection queries + walk fallback), actuation, a
 filterable event stream, and a warm-registry daemon, aligned to [cli-specs.intrane.fr](https://cli-specs.intrane.fr/).
 
 ## The design bet
@@ -65,9 +65,9 @@ that expose no action. Prefer `act`.
 ## Commands
 
 ```
-apps                          list applications exposing accessibility
+apps                          applications with pid, toolkit, window count
 windows [--app X]             top-level windows: geometry, title, active
-state --app X [--depth N] [--role R] [--all] [--collection|--walk]
+state --app X [--pid N] [--depth N] [--role R] [--all] [--collection|--walk]
 find <query> [--app X]        search elements by name substring
 act <ref> [--action N]        invoke the accessible action (preferred)
 read <ref>                    text, name, description
@@ -75,7 +75,7 @@ type <ref> <text> [--replace] [--allow-password]
 sendtext <text> [--via auto|clipboard|atspi]
                               type at the current focus (no ref needed)
 paste <text> [--no-restore]   clipboard + ctrl+v
-key <combo>                   e.g. ctrl+shift+t   (X11 only)
+key <combo> [--dry-run]       e.g. ctrl+shift+t, alt+F4   (X11 only)
 click <ref> | --x N --y N [--button B]
 launch <cmd> [--wait-for APP] [--timeout MS]
 watch [--app X] [--role R] [--events ...] [--max-events N] [--duration MS]
@@ -222,6 +222,42 @@ done
 1.8 million events, so most agent workloads never reach it — bound short runs
 with `--duration`/`--max-events` instead and this never comes up.
 
+## Addressing the right app, and the right key
+
+**Two apps can share a name.** Two browser profiles both publish `Microsoft
+Edge`. A plain `--app` matching more than one is now **refused** with
+`app_ambiguous` (exit 80) rather than resolving to whichever the desktop lists
+first:
+
+```
+$ linux-use apps
+  {"name":"Microsoft Edge","pid":872010,"toolkit":"Chromium","windows":1,
+   "ref":"Microsoft Edge#pid872010"}
+  {"name":"Microsoft Edge","pid":924858,...,"ref":"Microsoft Edge#pid924858"}
+  "ambiguous_names":["Microsoft Edge"]
+
+$ linux-use state --app 'Microsoft Edge'              # -> app_ambiguous, exit 80
+$ linux-use state --app 'Microsoft Edge#pid924858'    # -> 39 elements
+$ linux-use state --app 'Microsoft Edge' --pid 924858 # -> same
+```
+
+`apps` reports each `pid`, `toolkit` and a ready-made `ref` selector, and warns
+on stderr when names collide. `windows` and `find` honour the same filter.
+
+**X keysym names are case-sensitive.** `key` used to lowercase the whole combo
+before lookup, so `alt+F4` failed with `unknown_key` while aliases like `enter`
+masked the problem. Resolution now tries the alias table (case-insensitive),
+then the token exactly as written, then capitalised:
+
+| combo | resolves to |
+|---|---|
+| `alt+F4` / `alt+f4` | `Alt_L + F4` |
+| `ctrl+F12`, `Print`, `Menu`, `shift+Insert`, `Pause` | as written |
+| `ctrl+shift+t`, `enter`, `esc`, `pageup`, `super+left` | unchanged |
+
+`key <combo> --dry-run` resolves and reports without injecting — so a combo can
+be validated without closing a window to find out.
+
 ## Text entry: the clipboard is the default, for a reason
 
 AT-SPI key synthesis (`atspi_generate_keyboard_event`) **crashes Chromium/Edge
@@ -307,6 +343,7 @@ by doing it.
 Exit codes: `0` ok · `80` usage · `81` no_a11y · `82` app_not_found ·
 `83` ref_stale · `84` ref_not_found · `85` no_capability · `86` action_failed ·
 `87` no_display · `88` daemon · `89` refused · `90` rss_limit.
+Ambiguous `--app` reports `app_ambiguous` under exit `80`.
 
 ## Verified (Ubuntu 22.04, GNOME 42.9, X11 — v0.2 on an isolated Xvfb desktop)
 
@@ -401,10 +438,8 @@ These cost real debugging time and are the non-obvious part of this codebase.
 
 ## Next (v0.7)
 
-1. Injector backend abstraction for Wayland ([#1](https://github.com/javimosch/linux-use/issues/1)).
-2. Disambiguate apps sharing an accessible name ([#3](https://github.com/javimosch/linux-use/issues/3)).
-3. Case-sensitive keysyms so `alt+F4` works ([#2](https://github.com/javimosch/linux-use/issues/2)).
-4. Consecutive-event dedupe in `watch` (`xtest | uinput | libei | portal`) so Wayland
+1. Injector backend abstraction for Wayland ([#1](https://github.com/javimosch/linux-use/issues/1)) — the significant one: it is the difference between working on 22.04 and on a current default desktop.
+2. Consecutive-event dedupe in `watch` (`xtest | uinput | libei | portal`) so Wayland
    becomes a backend rather than a rewrite.
 4. The remaining three specs: update, feedback, telemetry.
 5. Screenshots + a vision fallback for the apps that expose no tree.
