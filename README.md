@@ -13,7 +13,7 @@ with no runtime dependencies.
 📦 **[Releases](https://github.com/javimosch/linux-use/releases)** ·
 ✨ **[awesome-machin](https://github.com/javimosch/awesome-machin)**
 
-**v0.6.3** — perception (memoized collection queries + walk fallback), actuation, a
+**v0.7.0** — perception (memoized collection queries + walk fallback), actuation, a
 filterable event stream, and a warm-registry daemon, aligned to [cli-specs.intrane.fr](https://cli-specs.intrane.fr/).
 
 ## The design bet
@@ -25,6 +25,50 @@ JSON both ways. Claude/Devin *is* the loop.
 
 That makes it model-agnostic, testable, fast, and a natural fit for the
 agent-first CLI specs.
+
+## What actually works, and what is untested
+
+Every "verified" row below was exercised by hand on this machine and is
+reproducible from the commands in this README. Rows that say **not tested** are
+not claims — they are gaps.
+
+| Target | Status | Evidence |
+|---|---|---|
+| **GTK 3/4 apps** | verified | gnome-calculator, gnome-text-editor, gnome-control-center, gnome-disks, seahorse, Nautilus — read, act, type, watch |
+| **Qt 5 apps** | verified | QDBusViewer: 12 interactive elements; `act` fired `ShowMenu` and the File menu opened |
+| **Chromium/Edge web content** | verified, **needs `--force-renderer-accessibility`** | a test page exposed 41 elements incl. real DOM buttons/inputs; Microsoft Teams navigated, composed and sent |
+| Chromium/Edge **without** that flag | **broken by design** | exposes exactly one `frame` — zero web content |
+| **Electron apps** | not tested | expected to need the same flag |
+| **Java (Swing/AWT)** | not tested | needs `java-atk-wrapper` |
+| **Flutter / canvas / games** | expected to expose nothing | not tested |
+| **Wayland** | `click`/`key` do not work | XTEST cannot reach native Wayland clients; AT-SPI paths still work. Tracked in [#1](https://github.com/javimosch/linux-use/issues/1) |
+
+**Tested on exactly one configuration:** Ubuntu 22.04.3, GNOME 42.9, X11,
+at-spi2-core 2.44.0, x86-64. Everything else is unknown territory:
+
+- **Not tested:** Wayland, KDE/XFCE/other desktops, other distros or GNOME
+  versions, HiDPI or fractional scaling, multi-monitor, non-US keyboard
+  layouts (`key` maps keysyms through the active layout), arm64.
+- **There is no automated test suite.** All verification was manual and
+  exploratory — the numbers and behaviours in this README are real measurements,
+  but nothing re-checks them on commit. `test/env.sh` is an isolation harness,
+  not a test runner. Treat this as a v0.x tool.
+
+### Things that went wrong while building it
+
+Documented because they are the honest failure modes of driving a desktop, not
+because they are fixed forever:
+
+- **It crashed a browser three times** before the cause was isolated to AT-SPI
+  key synthesis vs `--force-renderer-accessibility` ([#4](https://github.com/javimosch/linux-use/issues/4), fixed in 0.6.2 by
+  defaulting to the clipboard).
+- **It broke the developer's live accessibility bus once**, because a private
+  Xvfb + D-Bus test environment still shares `at-spi-bus-launcher`'s socket path
+  unless `XDG_RUNTIME_DIR` is overridden too. Every already-running app went
+  invisible to accessibility until restarted. `test/env.sh` now sets it.
+- **Two published measurements were wrong** and were corrected in later release
+  notes — a "zero memory growth" claim read off too short a run, and a
+  regression that turned out to predate the change blamed for it.
 
 ## Install
 
@@ -329,7 +373,7 @@ environment down **deletes the real session's a11y socket**, breaking
 accessibility for every already-running app until it restarts. This was learned
 by doing it.
 
-## Spec compliance (v0.2)
+## Spec compliance
 
 | Spec | Status |
 |---|---|
@@ -345,7 +389,7 @@ Exit codes: `0` ok · `80` usage · `81` no_a11y · `82` app_not_found ·
 `87` no_display · `88` daemon · `89` refused · `90` rss_limit.
 Ambiguous `--app` reports `app_ambiguous` under exit `80`.
 
-## Verified (Ubuntu 22.04, GNOME 42.9, X11 — v0.2 on an isolated Xvfb desktop)
+## Measurements (Ubuntu 22.04, GNOME 42.9, X11 — on an isolated Xvfb desktop)
 
 - **Perception**: 20+ apps enumerated; `gnome-calculator` → 28 interactive
   elements in **88 ms**. Microsoft Edge (Chromium) exposes its tree too.
@@ -423,11 +467,15 @@ These cost real debugging time and are the non-obvious part of this codebase.
 
 - **`SHOWING` != visible to the user.** An occluded widget is still `SHOWING`.
   Real visibility needs the window stack; the guide warns agents about this.
-- **Coverage is not universal.** GTK/Qt/Chromium/Electron are good; Java needs
-  `java-atk-wrapper`; Flutter/canvas UIs may expose nothing. `state` returning
-  0 elements means "no accessibility", not "empty window".
-- **Wayland is unsupported.** XTEST cannot reach native Wayland clients, so
-  `click`/`key` are X11-only. AT-SPI `act`/`type`/`read` still work.
+- **Coverage is not universal.** GTK and Qt are verified; Chromium needs a
+  launch flag; Java, Electron and canvas-drawn UIs are untested or expected to
+  expose nothing. `state` returning 0 elements means "no accessibility", not
+  "empty window" — see the capability table above.
+- **Wayland is unsupported for synthetic input.** XTEST cannot reach native
+  Wayland clients, so `click`/`key` are X11-only. AT-SPI `act`/`type`/`read`
+  still work. This is the single biggest gap: Ubuntu 24.04+ defaults to Wayland.
+- **No automated tests.** See above.
+- **x86-64 only.** No arm64 build.
 - The tree walk is still recursive with a node budget; it warns and sets
   `truncated:true`/`depth_limited:true` rather than silently capping.
 - `watch` cannot yet dedupe repeated events; a chatty app produces a lot of
@@ -436,10 +484,13 @@ These cost real debugging time and are the non-obvious part of this codebase.
   with a no-op callback; see above). Bound long-lived listeners with
   `--max-rss` and restart on exit 90.
 
-## Next (v0.7)
+## Next
 
-1. Injector backend abstraction for Wayland ([#1](https://github.com/javimosch/linux-use/issues/1)) — the significant one: it is the difference between working on 22.04 and on a current default desktop.
-2. Consecutive-event dedupe in `watch` (`xtest | uinput | libei | portal`) so Wayland
+1. **An automated test suite.** The most valuable missing thing: today every
+   claim here rests on manual runs.
+2. Injector backend abstraction for Wayland ([#1](https://github.com/javimosch/linux-use/issues/1)) — the difference between
+   working on 22.04 and on a current default desktop.
+3. Consecutive-event dedupe in `watch` (`xtest | uinput | libei | portal`) so Wayland
    becomes a backend rather than a rewrite.
 4. The remaining three specs: update, feedback, telemetry.
 5. Screenshots + a vision fallback for the apps that expose no tree.

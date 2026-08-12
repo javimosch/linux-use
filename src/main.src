@@ -123,7 +123,7 @@ var ST_VISIBLE = 30
 var COORD_SCREEN = 0
 var KEY_STRING = 4
 
-var VERSION = "0.6.3"
+var VERSION = "0.7.0"
 var SCHEMA = "linux-use/v1"
 
 // ---------------------------------------------------------------- json utils

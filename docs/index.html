@@ -20,7 +20,7 @@
 
   <header class="mb-14">
     <div class="flex items-center gap-3 mb-5 flex-wrap">
-      <span class="text-xs font-medium px-2.5 py-1 rounded-full bg-blue-500/10 text-blue-300 border border-blue-500/20">v0.6.3</span>
+      <span class="text-xs font-medium px-2.5 py-1 rounded-full bg-blue-500/10 text-blue-300 border border-blue-500/20">v0.7.0</span>
       <span class="text-xs font-medium px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">154 KB static binary</span>
       <span class="text-xs font-medium px-2.5 py-1 rounded-full bg-white/5 text-slate-400 border border-white/10">MIT</span>
     </div>
@@ -79,6 +79,26 @@ $ linux-use watch --app gnome-calculator --role editbar --duration 5000</pre>
         <h3 class="font-semibold text-white mb-1.5">Incomplete answers are loud</h3>
         <p class="text-slate-400 text-sm leading-relaxed">A truncated or depth-limited read says so, in the JSON and on stderr — because "0 elements" silently meaning "I didn't look" is how agents get misled.</p>
       </div>
+    </div>
+  </section>
+
+  <section class="mb-14">
+    <h2 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-4">What works, and what is untested</h2>
+    <div class="card rounded-xl p-6">
+      <table class="w-full text-sm">
+        <tbody class="text-slate-400">
+          <tr><td class="py-1.5 pr-4 text-slate-300">GTK 3/4 apps</td><td class="text-emerald-400">verified</td><td class="text-slate-500">6 apps: read, act, type, watch</td></tr>
+          <tr><td class="py-1.5 pr-4 text-slate-300">Qt 5 apps</td><td class="text-emerald-400">verified</td><td class="text-slate-500">menus actuated via ShowMenu</td></tr>
+          <tr><td class="py-1.5 pr-4 text-slate-300">Chromium/Edge web content</td><td class="text-amber-400">needs a flag</td><td class="text-slate-500"><code>--force-renderer-accessibility</code></td></tr>
+          <tr><td class="py-1.5 pr-4 text-slate-300">Electron, Java, Flutter</td><td class="text-slate-500">not tested</td><td class="text-slate-500">—</td></tr>
+          <tr><td class="py-1.5 pr-4 text-slate-300">Wayland</td><td class="text-red-400">click/key broken</td><td class="text-slate-500">AT-SPI paths still work</td></tr>
+        </tbody>
+      </table>
+      <p class="text-slate-500 text-sm mt-4 leading-relaxed">
+        Tested on exactly one configuration — Ubuntu 22.04.3, GNOME 42.9, X11, x86-64 — by hand.
+        <strong class="text-slate-400">There is no automated test suite yet</strong>: the numbers here are real
+        measurements, but nothing re-checks them on commit. Treat it as a v0.x tool.
+      </p>
     </div>
   </section>
 
