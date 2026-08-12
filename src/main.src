@@ -121,7 +121,7 @@ var ST_VISIBLE = 30
 var COORD_SCREEN = 0
 var KEY_STRING = 4
 
-var VERSION = "0.6.1"
+var VERSION = "0.6.2"
 var SCHEMA = "linux-use/v1"
 
 // ---------------------------------------------------------------- json utils
@@ -1068,8 +1068,16 @@ func cmd_type(ref, text, replace, allowpw) (out, code) {
 			out = errjson("focus_refused", "could not focus '"+role+"', so typing would go somewhere unknown", true, []string{"click it first: linux-use click " + ref, "then verify focused:true in: linux-use state --app <app>", "then: linux-use sendtext '<text>'"})
 			return
 		}
-		ok = atspi_generate_keyboard_event(0, text, KEY_STRING, 0)
-		method = "keyboard.string(focus-verified)"
+		// Focus is verified, so prefer the clipboard route: AT-SPI key
+		// synthesis crashes a11y-forced Chromium (issue #4).
+		if has_xclip() {
+			ok, _ = clip_paste(text, true)
+			method = "clipboard+ctrl_v(focus-verified)"
+		} else {
+			ok = atspi_generate_keyboard_event(0, text, KEY_STRING, 0)
+			method = "keyboard.string(focus-verified)"
+			write(2, "warning: xclip not found, used AT-SPI key synthesis — crashes a11y-forced Chromium (issue #4)\n")
+		}
 	}
 	g_object_unref(node)
 	if !ok {
@@ -1149,11 +1157,50 @@ func keysym_for(tok) (name) {
 // it works on apps that expose no accessibility tree at all (an Electron/PWA
 // window whose browser process started before the a11y bus, say). The trade-off
 // is that it types wherever focus happens to be — verify focus first.
-func cmd_sendtext(text) (out, code) {
+// cmd_sendtext types at the current focus. `via` selects the mechanism:
+//   ""/"auto"   clipboard when xclip is present, else AT-SPI with a warning
+//   "clipboard" clipboard + ctrl+v (safe everywhere)
+//   "atspi"     atspi_generate_keyboard_event — CRASHES a11y-forced Chromium
+// The default changed in 0.6.2: AT-SPI key synthesis kills any Chromium
+// launched with --force-renderer-accessibility (issue #4), which is exactly the
+// configuration needed to drive a web app, so it can no longer be the default.
+func cmd_sendtext(text, via) (out, code) {
 	code = EX_OK
 	if len(text) == 0 {
 		code = EX_USAGE
 		out = errjson("missing_text", "sendtext needs a string", true, []string{"example: linux-use sendtext 'hello'"})
+		return
+	}
+	mech := via
+	if mech == "" {
+		mech = "auto"
+	}
+	if mech != "auto" && mech != "clipboard" && mech != "atspi" {
+		code = EX_USAGE
+		out = errjson("bad_via", "--via takes auto|clipboard|atspi", true, []string{"omit --via for the safe default"})
+		return
+	}
+	if mech == "auto" {
+		if has_xclip() {
+			mech = "clipboard"
+		} else {
+			mech = "atspi"
+			write(2, "warning: xclip not found, falling back to AT-SPI key synthesis — this CRASHES Chromium/Edge started with --force-renderer-accessibility (issue #4). Install xclip to avoid it.\n")
+		}
+	}
+	if mech == "clipboard" {
+		if !has_xclip() {
+			code = EX_NO_CAPABILITY
+			out = errjson("xclip_missing", "--via clipboard needs xclip on PATH", true, []string{"sudo apt install xclip"})
+			return
+		}
+		ok, restored := clip_paste(text, true)
+		if !ok {
+			code = EX_ACTION_FAILED
+			out = errjson("sendtext_failed", "clipboard paste failed", true, []string{"run: linux-use doctor"})
+			return
+		}
+		out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("chars", str(len(text))) + "," + jkv("method", jstr("clipboard+ctrl_v")) + "," + jkv("clipboard_restored", jbool(restored)) + "}"
 		return
 	}
 	ok := atspi_generate_keyboard_event(0, text, KEY_STRING, 0)
@@ -1162,7 +1209,7 @@ func cmd_sendtext(text) (out, code) {
 		out = errjson("sendtext_failed", "the a11y registry refused to synthesize the string", true, []string{"check: linux-use doctor"})
 		return
 	}
-	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("chars", str(len(text))) + "," + jkv("method", jstr("keyboard.string")) + "}"
+	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("chars", str(len(text))) + "," + jkv("method", jstr("keyboard.string")) + "," + jkv("warning", jstr("AT-SPI key synthesis crashes a11y-forced Chromium")) + "}"
 }
 
 // cmd_paste puts text on the clipboard and presses ctrl+v via XTEST.
@@ -1175,19 +1222,18 @@ func cmd_sendtext(text) (out, code) {
 //
 // The text goes to the clipboard via a temp FILE, never through a shell
 // argument, so quotes/newlines/$ in the payload cannot be reinterpreted.
-func cmd_paste(text, restore) (out, code) {
-	code = EX_OK
-	if len(text) == 0 {
-		code = EX_USAGE
-		out = errjson("missing_text", "paste needs a string", true, []string{"example: linux-use paste 'hello'"})
-		return
-	}
-	probe := system("command -v xclip >/dev/null 2>&1")
-	if probe != 0 {
-		code = EX_NO_CAPABILITY
-		out = errjson("xclip_missing", "paste needs xclip on PATH", true, []string{"sudo apt install xclip", "or use: linux-use sendtext (but it crashes a11y-forced Chromium)"})
-		return
-	}
+func has_xclip() (b) {
+	b = system("command -v xclip >/dev/null 2>&1") == 0
+}
+
+// clip_paste puts text on the CLIPBOARD selection and sends ctrl+v via XTEST.
+// Returns (ok, restored). It deliberately avoids the AT-SPI input controller,
+// which crashes Chromium built with forced renderer accessibility (issue #4).
+// The payload is staged through a FILE, never a shell argument, so quotes,
+// newlines and $ in the text cannot be reinterpreted.
+func clip_paste(text, restore) (ok, restored) {
+	ok = false
+	restored = false
 	tmp := "/tmp/.linux-use-clip"
 	old := ""
 	if restore {
@@ -1195,8 +1241,6 @@ func cmd_paste(text, restore) (out, code) {
 		old = o
 	}
 	if write_file(tmp, text) < 0 {
-		code = EX_ACTION_FAILED
-		out = errjson("clip_write_failed", "could not stage the clipboard payload", false, []string{"check /tmp is writable"})
 		return
 	}
 	// xclip stays alive to OWN the selection, so it must be backgrounded —
@@ -1206,8 +1250,6 @@ func cmd_paste(text, restore) (out, code) {
 
 	dpy := xopen()
 	if dpy == 0 {
-		code = EX_NO_DISPLAY
-		out = errjson("no_display", "cannot open X display to send ctrl+v", false, []string{"run: linux-use doctor"})
 		return
 	}
 	ctrl := XKeysymToKeycode(dpy, XStringToKeysym("Control_L"))
@@ -1219,14 +1261,34 @@ func cmd_paste(text, restore) (out, code) {
 	XSync(dpy, false)
 	XCloseDisplay(dpy)
 	sleep(250)
+	ok = true
 
-	restored := false
 	if restore && len(old) > 0 {
 		if write_file(tmp, old) >= 0 {
 			system("xclip -selection clipboard -i " + tmp + " >/dev/null 2>&1 &")
 			sleep(200)
 			restored = true
 		}
+	}
+}
+
+func cmd_paste(text, restore) (out, code) {
+	code = EX_OK
+	if len(text) == 0 {
+		code = EX_USAGE
+		out = errjson("missing_text", "paste needs a string", true, []string{"example: linux-use paste 'hello'"})
+		return
+	}
+	if !has_xclip() {
+		code = EX_NO_CAPABILITY
+		out = errjson("xclip_missing", "paste needs xclip on PATH", true, []string{"sudo apt install xclip", "or force the unsafe path: linux-use sendtext --via atspi '<text>'"})
+		return
+	}
+	ok, restored := clip_paste(text, restore)
+	if !ok {
+		code = EX_ACTION_FAILED
+		out = errjson("paste_failed", "could not set the clipboard or send ctrl+v", true, []string{"run: linux-use doctor"})
+		return
 	}
 	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("chars", str(len(text))) + "," + jkv("method", jstr("clipboard+ctrl_v")) + "," + jkv("clipboard_restored", jbool(restored)) + "}"
 }
@@ -1409,6 +1471,14 @@ func cmd_doctor() (out, code) {
 		XCloseDisplay(dpy)
 	}
 	f = append(f, jkv("xtest", jbool(xok)))
+	xc := has_xclip()
+	f = append(f, jkv("clipboard_backend", jbool(xc)))
+	f = append(f, jkv("text_entry_default", jstr("clipboard+ctrl_v")))
+	if !xc {
+		f = append(f, jkv("text_entry_actual", jstr("atspi.keystring (UNSAFE for a11y-forced Chromium)")))
+	} else {
+		f = append(f, jkv("text_entry_actual", jstr("clipboard+ctrl_v")))
+	}
 
 	probs := []string{}
 	if !tkon {
@@ -1416,6 +1486,9 @@ func cmd_doctor() (out, code) {
 	}
 	if !a11y {
 		probs = append(probs, jstr("the AT-SPI bus is unreachable — perception will not work at all"))
+	}
+	if !xc {
+		probs = append(probs, jstr("xclip is missing, so text entry falls back to AT-SPI key synthesis, which CRASHES Chromium/Edge started with --force-renderer-accessibility (issue #4). Fix: sudo apt install xclip"))
 	}
 	if !xok {
 		probs = append(probs, jstr("no X display — click/key actuation unavailable (Wayland is not supported in v0.1; AT-SPI actions still work)"))
@@ -1802,7 +1875,7 @@ func guide_json() (r) {
 	g = append(g, jstr("SHOWING does not mean visible. An element can be SHOWING while completely hidden behind another window. Never tell a user 'you can see X' based on this tool."))
 	g = append(g, jstr("Coverage is not universal. GTK/Qt/Chromium/Electron expose good trees. Java needs java-atk-wrapper. Flutter, games, and canvas-drawn UIs may expose almost nothing — 'state' returning 0 elements means no accessibility, not an empty window."))
 	g = append(g, jstr("state is filtered to interactive roles by default. Use --all for the full tree (labels, panels) when you need to READ the UI rather than act on it."))
-	g = append(g, jstr("CHROMIUM CRASH: 'sendtext' (atspi_generate_keyboard_event) CRASHES Chromium/Edge launched with --force-renderer-accessibility — reproduced on a bare input page with focus verified. Use 'paste' for those; it goes via the clipboard and ctrl+v (XTEST) and does not touch the AT-SPI input controller."))
+	g = append(g, jstr("CHROMIUM CRASH (issue #4): AT-SPI key synthesis CRASHES Chromium/Edge launched with --force-renderer-accessibility — reproduced on a bare input page with focus verified. Since 0.6.2 text entry therefore goes through the CLIPBOARD by default (set CLIPBOARD, send ctrl+v via XTEST): 'paste', 'sendtext' and the 'type' fallback are all safe out of the box. 'sendtext --via atspi' opts back into the crashing path deliberately; 'linux-use doctor' reports which backend is actually in use."))
 	g = append(g, jstr("SAFETY: 'type <ref>' now verifies the element actually took focus before synthesizing keystrokes, and fails with focus_refused rather than typing into an unknown target. 'sendtext' does NOT — it types wherever focus is, by design, so confirm focus yourself (check focused:true in state) before using it. A stray space presses whatever button is focused."))
 	g = append(g, jstr("'type' uses the editable-text interface when available (deterministic, no focus needed) and falls back to synthesized keystrokes. It REFUSES password fields unless --allow-password."))
 	g = append(g, jstr("'key' needs X11: it maps keysyms through the active keyboard layout via XTEST. On Wayland it will fail — use 'act' instead."))
@@ -1867,7 +1940,7 @@ func helpjson() (r) {
 	cmds = append(cmds, "{"+jkv("name", jstr("read"))+","+jkv("args", jarr([]string{jstr("<ref>")}))+","+jkv("summary", jstr("read an element's text, name and description"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("type"))+","+jkv("args", jarr([]string{jstr("<ref>"), jstr("<text>"), jstr("--replace"), jstr("--allow-password")}))+","+jkv("summary", jstr("insert text via the editable-text interface"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("paste"))+","+jkv("args", jarr([]string{jstr("<text>"), jstr("--no-restore")}))+","+jkv("summary", jstr("put text on the clipboard and ctrl+v it — the safe way to type into Chromium"))+"}")
-	cmds = append(cmds, "{"+jkv("name", jstr("sendtext"))+","+jkv("args", jarr([]string{jstr("<text>")}))+","+jkv("summary", jstr("type a literal string at the current focus (no ref; works without a11y)"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("sendtext"))+","+jkv("args", jarr([]string{jstr("<text>"), jstr("--via auto|clipboard|atspi")}))+","+jkv("summary", jstr("type a literal string at the current focus (no ref; works without a11y)"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("key"))+","+jkv("args", jarr([]string{jstr("<combo>")}))+","+jkv("summary", jstr("send a key combo via XTEST, e.g. ctrl+shift+t"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("click"))+","+jkv("args", jarr([]string{jstr("<ref>"), jstr("--x"), jstr("--y"), jstr("--button")}))+","+jkv("summary", jstr("synthetic pointer click at an element or coordinates"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("launch"))+","+jkv("args", jarr([]string{jstr("<command>"), jstr("--wait-for"), jstr("--timeout")}))+","+jkv("summary", jstr("spawn a program, optionally waiting for it to register"))+"}")
@@ -2037,6 +2110,7 @@ func run_cmd(argv) (out, code) {
 	fs = flag_int(fs, "duration", "", "0", "stop after N ms (0 = unlimited)")
 	fs = flag_int(fs, "max-rss", "", "0", "watch: exit 90 above this RSS in kB (0 = unlimited)")
 	fs = flag_str(fs, "events", "e", "", "comma-separated AT-SPI event types")
+	fs = flag_str(fs, "via", "", "", "sendtext mechanism: auto|clipboard|atspi")
 	fs = flag_int(fs, "port", "p", "7777", "daemon port")
 	fs = flag_int(fs, "x", "", "-1", "pointer x")
 	fs = flag_int(fs, "y", "", "-1", "pointer y")
@@ -2130,7 +2204,7 @@ func run_cmd(argv) (out, code) {
 		if len(pos) > 0 {
 			t = pos[0]
 		}
-		out, code = cmd_sendtext(t)
+		out, code = cmd_sendtext(t, flag_get(fs, "via"))
 		return
 	}
 	if cmd == "paste" {

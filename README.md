@@ -6,14 +6,14 @@
 
 Agent-first, CLI-first GUI control for Linux desktops — the Linux answer to
 [Windows-Use](https://github.com/Jeomon/Windows-Use), built in
-[machin (MFL)](https://github.com/javimosch/machin) as a single 162 KB binary
+[machin (MFL)](https://github.com/javimosch/machin) as a single 175 KB binary
 with no runtime dependencies.
 
 📖 **[Docs & changelog](https://javimosch.github.io/linux-use/)** ·
 📦 **[Releases](https://github.com/javimosch/linux-use/releases)** ·
 ✨ **[awesome-machin](https://github.com/javimosch/awesome-machin)**
 
-**v0.6.0** — perception (memoized collection queries + walk fallback), actuation, a
+**v0.6.2** — perception (memoized collection queries + walk fallback), actuation, a
 filterable event stream, and a warm-registry daemon, aligned to [cli-specs.intrane.fr](https://cli-specs.intrane.fr/).
 
 ## The design bet
@@ -72,6 +72,9 @@ find <query> [--app X]        search elements by name substring
 act <ref> [--action N]        invoke the accessible action (preferred)
 read <ref>                    text, name, description
 type <ref> <text> [--replace] [--allow-password]
+sendtext <text> [--via auto|clipboard|atspi]
+                              type at the current focus (no ref needed)
+paste <text> [--no-restore]   clipboard + ctrl+v
 key <combo>                   e.g. ctrl+shift+t   (X11 only)
 click <ref> | --x N --y N [--button B]
 launch <cmd> [--wait-for APP] [--timeout MS]
@@ -219,6 +222,41 @@ done
 1.8 million events, so most agent workloads never reach it — bound short runs
 with `--duration`/`--max-events` instead and this never comes up.
 
+## Text entry: the clipboard is the default, for a reason
+
+AT-SPI key synthesis (`atspi_generate_keyboard_event`) **crashes Chromium/Edge
+launched with `--force-renderer-accessibility`** — reproduced on a bare
+`<input>` page with focus verified, 3/3 times, payloads of 11/16/112 chars
+([#4](https://github.com/javimosch/linux-use/issues/4)). Since that flag is the
+only way to make a browser expose web content to AT-SPI, the crash lands exactly
+where the tool is most useful.
+
+So since v0.6.2 text entry goes through the **clipboard** by default: set the
+CLIPBOARD selection, send `ctrl+v` via XTEST, restore the previous clipboard.
+That path never touches the AT-SPI input controller.
+
+| command | what it does |
+|---|---|
+| `type <ref> <text>` | editable-text interface if available; else verifies focus, then clipboard |
+| `sendtext <text>` | types at current focus; `--via auto` (default) picks clipboard when `xclip` is present |
+| `paste <text>` | clipboard + `ctrl+v` explicitly |
+
+Measured A/B on the repro page, focus verified on the input:
+
+| mechanism | result |
+|---|---|
+| default (`clipboard+ctrl_v`) | text lands, **browser alive** |
+| `sendtext --via atspi` | **browser dead** |
+
+`linux-use doctor` reports which backend is actually in use, and warns if
+`xclip` is missing (in which case entry falls back to the crashing path and says
+so on stderr rather than silently killing a browser).
+
+`type <ref>` also **verifies the element actually took focus** before
+synthesizing anything — `grab_focus` silently does nothing on some web
+elements, and typing into an unknown focus is how a stray space presses whatever
+button happens to be focused.
+
 ## Depth: shallow answers are now loud
 
 v0.1 defaulted to `--depth 14` and silently returned a shallow tree.
@@ -363,8 +401,10 @@ These cost real debugging time and are the non-obvious part of this codebase.
 
 ## Next (v0.7)
 
-1. Consecutive-event dedupe in `watch`.
-2. Injector backend abstraction (`xtest | uinput | libei | portal`) so Wayland
+1. Injector backend abstraction for Wayland ([#1](https://github.com/javimosch/linux-use/issues/1)).
+2. Disambiguate apps sharing an accessible name ([#3](https://github.com/javimosch/linux-use/issues/3)).
+3. Case-sensitive keysyms so `alt+F4` works ([#2](https://github.com/javimosch/linux-use/issues/2)).
+4. Consecutive-event dedupe in `watch` (`xtest | uinput | libei | portal`) so Wayland
    becomes a backend rather than a rewrite.
 4. The remaining three specs: update, feedback, telemetry.
 5. Screenshots + a vision fallback for the apps that expose no tree.
