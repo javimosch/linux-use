@@ -121,7 +121,7 @@ var ST_VISIBLE = 30
 var COORD_SCREEN = 0
 var KEY_STRING = 4
 
-var VERSION = "0.6.0"
+var VERSION = "0.6.1"
 var SCHEMA = "linux-use/v1"
 
 // ---------------------------------------------------------------- json utils
@@ -1049,15 +1049,27 @@ func cmd_type(ref, text, replace, allowpw) (out, code) {
 		g_object_unref(et)
 	}
 	if !ok {
-		// Fallback: focus the widget and synthesize the string.
+		// Fallback: focus the widget, then synthesize the string.
+		//
+		// VERIFY the focus landed before typing. grab_focus silently does
+		// nothing on some web elements (Chromium), and synthesizing a string
+		// into an unknown focus is genuinely dangerous: a space character
+		// presses whatever button happens to be focused. That is not
+		// hypothetical — it closed a browser during testing.
 		comp := atspi_accessible_get_component_iface(node)
 		if comp != 0 {
 			atspi_component_grab_focus(comp, 0)
 			g_object_unref(comp)
-			sleep(40)
+			sleep(120)
+		}
+		if !hasstate(node, ST_FOCUSED) {
+			g_object_unref(node)
+			code = EX_NO_CAPABILITY
+			out = errjson("focus_refused", "could not focus '"+role+"', so typing would go somewhere unknown", true, []string{"click it first: linux-use click " + ref, "then verify focused:true in: linux-use state --app <app>", "then: linux-use sendtext '<text>'"})
+			return
 		}
 		ok = atspi_generate_keyboard_event(0, text, KEY_STRING, 0)
-		method = "keyboard.string"
+		method = "keyboard.string(focus-verified)"
 	}
 	g_object_unref(node)
 	if !ok {
@@ -1151,6 +1163,72 @@ func cmd_sendtext(text) (out, code) {
 		return
 	}
 	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("chars", str(len(text))) + "," + jkv("method", jstr("keyboard.string")) + "}"
+}
+
+// cmd_paste puts text on the clipboard and presses ctrl+v via XTEST.
+//
+// This exists because atspi_generate_keyboard_event (what `sendtext` uses)
+// CRASHES Chromium/Edge launched with --force-renderer-accessibility —
+// reproduced on a bare <input> page with focus verified, so it is not
+// app-specific. The clipboard route never touches the AT-SPI device-event
+// controller, so it is the safe way to put text into an a11y-forced browser.
+//
+// The text goes to the clipboard via a temp FILE, never through a shell
+// argument, so quotes/newlines/$ in the payload cannot be reinterpreted.
+func cmd_paste(text, restore) (out, code) {
+	code = EX_OK
+	if len(text) == 0 {
+		code = EX_USAGE
+		out = errjson("missing_text", "paste needs a string", true, []string{"example: linux-use paste 'hello'"})
+		return
+	}
+	probe := system("command -v xclip >/dev/null 2>&1")
+	if probe != 0 {
+		code = EX_NO_CAPABILITY
+		out = errjson("xclip_missing", "paste needs xclip on PATH", true, []string{"sudo apt install xclip", "or use: linux-use sendtext (but it crashes a11y-forced Chromium)"})
+		return
+	}
+	tmp := "/tmp/.linux-use-clip"
+	old := ""
+	if restore {
+		_, o, _ := exec("xclip -selection clipboard -o 2>/dev/null")
+		old = o
+	}
+	if write_file(tmp, text) < 0 {
+		code = EX_ACTION_FAILED
+		out = errjson("clip_write_failed", "could not stage the clipboard payload", false, []string{"check /tmp is writable"})
+		return
+	}
+	// xclip stays alive to OWN the selection, so it must be backgrounded —
+	// a foreground system() call never returns.
+	system("xclip -selection clipboard -i " + tmp + " >/dev/null 2>&1 &")
+	sleep(200)
+
+	dpy := xopen()
+	if dpy == 0 {
+		code = EX_NO_DISPLAY
+		out = errjson("no_display", "cannot open X display to send ctrl+v", false, []string{"run: linux-use doctor"})
+		return
+	}
+	ctrl := XKeysymToKeycode(dpy, XStringToKeysym("Control_L"))
+	v := XKeysymToKeycode(dpy, XStringToKeysym("v"))
+	XTestFakeKeyEvent(dpy, ctrl, 1, 0)
+	XTestFakeKeyEvent(dpy, v, 1, 0)
+	XTestFakeKeyEvent(dpy, v, 0, 0)
+	XTestFakeKeyEvent(dpy, ctrl, 0, 0)
+	XSync(dpy, false)
+	XCloseDisplay(dpy)
+	sleep(250)
+
+	restored := false
+	if restore && len(old) > 0 {
+		if write_file(tmp, old) >= 0 {
+			system("xclip -selection clipboard -i " + tmp + " >/dev/null 2>&1 &")
+			sleep(200)
+			restored = true
+		}
+	}
+	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("chars", str(len(text))) + "," + jkv("method", jstr("clipboard+ctrl_v")) + "," + jkv("clipboard_restored", jbool(restored)) + "}"
 }
 
 func cmd_key(combo) (out, code) {
@@ -1724,6 +1802,8 @@ func guide_json() (r) {
 	g = append(g, jstr("SHOWING does not mean visible. An element can be SHOWING while completely hidden behind another window. Never tell a user 'you can see X' based on this tool."))
 	g = append(g, jstr("Coverage is not universal. GTK/Qt/Chromium/Electron expose good trees. Java needs java-atk-wrapper. Flutter, games, and canvas-drawn UIs may expose almost nothing — 'state' returning 0 elements means no accessibility, not an empty window."))
 	g = append(g, jstr("state is filtered to interactive roles by default. Use --all for the full tree (labels, panels) when you need to READ the UI rather than act on it."))
+	g = append(g, jstr("CHROMIUM CRASH: 'sendtext' (atspi_generate_keyboard_event) CRASHES Chromium/Edge launched with --force-renderer-accessibility — reproduced on a bare input page with focus verified. Use 'paste' for those; it goes via the clipboard and ctrl+v (XTEST) and does not touch the AT-SPI input controller."))
+	g = append(g, jstr("SAFETY: 'type <ref>' now verifies the element actually took focus before synthesizing keystrokes, and fails with focus_refused rather than typing into an unknown target. 'sendtext' does NOT — it types wherever focus is, by design, so confirm focus yourself (check focused:true in state) before using it. A stray space presses whatever button is focused."))
 	g = append(g, jstr("'type' uses the editable-text interface when available (deterministic, no focus needed) and falls back to synthesized keystrokes. It REFUSES password fields unless --allow-password."))
 	g = append(g, jstr("'key' needs X11: it maps keysyms through the active keyboard layout via XTEST. On Wayland it will fail — use 'act' instead."))
 	g = append(g, jstr("state/find run a SERVER-SIDE collection query when you pass --role (measured ~9x faster on a large app: 5ms vs 47ms) and a recursive tree walk otherwise. The `method` field says which ran; force either with --collection / --walk."))
@@ -1786,6 +1866,7 @@ func helpjson() (r) {
 	cmds = append(cmds, "{"+jkv("name", jstr("act"))+","+jkv("args", jarr([]string{jstr("<ref>"), jstr("--action N")}))+","+jkv("summary", jstr("invoke the element's accessible action (preferred)"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("read"))+","+jkv("args", jarr([]string{jstr("<ref>")}))+","+jkv("summary", jstr("read an element's text, name and description"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("type"))+","+jkv("args", jarr([]string{jstr("<ref>"), jstr("<text>"), jstr("--replace"), jstr("--allow-password")}))+","+jkv("summary", jstr("insert text via the editable-text interface"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("paste"))+","+jkv("args", jarr([]string{jstr("<text>"), jstr("--no-restore")}))+","+jkv("summary", jstr("put text on the clipboard and ctrl+v it — the safe way to type into Chromium"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("sendtext"))+","+jkv("args", jarr([]string{jstr("<text>")}))+","+jkv("summary", jstr("type a literal string at the current focus (no ref; works without a11y)"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("key"))+","+jkv("args", jarr([]string{jstr("<combo>")}))+","+jkv("summary", jstr("send a key combo via XTEST, e.g. ctrl+shift+t"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("click"))+","+jkv("args", jarr([]string{jstr("<ref>"), jstr("--x"), jstr("--y"), jstr("--button")}))+","+jkv("summary", jstr("synthetic pointer click at an element or coordinates"))+"}")
@@ -1964,6 +2045,7 @@ func run_cmd(argv) (out, code) {
 	fs = flag_int(fs, "timeout", "t", "8000", "timeout in ms")
 	fs = flag_str(fs, "wait-for", "w", "", "app name to wait for after launch")
 	fs = flag_bool(fs, "all", "", "include non-interactive nodes")
+	fs = flag_bool(fs, "no-restore", "", "paste: do not restore the previous clipboard")
 	fs = flag_bool(fs, "walk", "", "force the recursive tree walk")
 	fs = flag_bool(fs, "collection", "", "force a server-side collection query")
 	fs = flag_bool(fs, "replace", "", "replace existing text instead of inserting")
@@ -2049,6 +2131,14 @@ func run_cmd(argv) (out, code) {
 			t = pos[0]
 		}
 		out, code = cmd_sendtext(t)
+		return
+	}
+	if cmd == "paste" {
+		t := ""
+		if len(pos) > 0 {
+			t = pos[0]
+		}
+		out, code = cmd_paste(t, !flag_on(fs, "no-restore"))
 		return
 	}
 	if cmd == "key" {
