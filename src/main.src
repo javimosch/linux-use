@@ -123,7 +123,7 @@ var ST_VISIBLE = 30
 var COORD_SCREEN = 0
 var KEY_STRING = 4
 
-var VERSION = "0.7.0"
+var VERSION = "0.7.1"
 var SCHEMA = "linux-use/v1"
 
 // ---------------------------------------------------------------- json utils
@@ -216,10 +216,17 @@ func splitref(ref) (app, path, want) {
 	app = ""
 	path = ""
 	want = ""
+	// Split the fingerprint on the LAST '#': the app part may itself contain
+	// '#pid<N>' when a name is shared by several processes.
 	hp := split(ref, "#")
 	left := hp[0]
 	if len(hp) > 1 {
-		want = hp[1]
+		want = hp[len(hp)-1]
+		i := 1
+		while i < len(hp)-1 {
+			left = left + "#" + hp[i]
+			i = i + 1
+		}
 	}
 	parts := split(left, ":")
 	if len(parts) < 2 {
@@ -370,6 +377,34 @@ func hasstate(node, st) (b) {
 	if ss != 0 {
 		b = atspi_state_set_contains(ss, st)
 		g_object_unref(ss)
+	}
+}
+
+// apps_named counts how many applications publish a name — used to decide
+// whether an emitted ref must be qualified with a pid to stay resolvable.
+func apps_named(nm) (n) {
+	n = 0
+	c := atspi_accessible_get_child_count(desktop, 0)
+	i := 0
+	while i < c {
+		a := atspi_accessible_get_child_at_index(desktop, i, 0)
+		if a != 0 {
+			if nodename(a) == nm {
+				n = n + 1
+			}
+			g_object_unref(a)
+		}
+		i = i + 1
+	}
+}
+
+// qualify_app returns the app name to embed in refs: bare when unique, or
+// "<name>#pid<PID>" when the name is shared, so that every ref this tool hands
+// out can actually be resolved.
+func qualify_app(a, nm) (r) {
+	r = nm
+	if apps_named(nm) > 1 {
+		r = nm + "#pid" + str(atspi_accessible_get_process_id(a, 0))
 	}
 }
 
@@ -587,7 +622,11 @@ func collect(appname, app, rolefilter, maxnodes) (out, n, ok, unknown, unpathed)
 								// real element: emit it with ref_ok:false rather
 								// than silently dropping it from the answer.
 								path, an, pok := pathof(node)
-								refok := pok && an == appname
+								// appname may be pid-qualified for refs, but
+								// pathof reports the RAW name — compare on that
+								// or every ref silently downgrades to geometry.
+								rawname := split(appname, "#pid")[0]
+								refok := pok && an == rawname
 								if !refok {
 									// No provable path (broken parent/child
 									// reciprocity). Addressable by geometry
@@ -938,8 +977,8 @@ func cmd_find(query, appfilter, maxdepth, maxnodes) (out, code) {
 	while i < n {
 		a := atspi_accessible_get_child_at_index(desktop, i, 0)
 		if a != 0 {
-			nm := nodename(a)
-			if app_matches(a, nm, appfilter) {
+			nm := qualify_app(a, nodename(a))
+			if app_matches(a, nodename(a), appfilter) {
 				rows = []string{}
 				budget = maxnodes
 				cok := false

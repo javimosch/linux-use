@@ -9,11 +9,13 @@ Agent-first, CLI-first GUI control for Linux desktops — the Linux answer to
 [machin (MFL)](https://github.com/javimosch/machin) as a single 179 KB binary
 with no runtime dependencies.
 
+🤖 **Driving this from an agent?** Read [`.agents/skills/linux-use/SKILL.md`](.agents/skills/linux-use/SKILL.md) — a drop-in skill for Claude Code / Devin / anything that reads `SKILL.md`. `linux-use guide` embeds the same manual in the binary.
+
 📖 **[Docs & changelog](https://javimosch.github.io/linux-use/)** ·
 📦 **[Releases](https://github.com/javimosch/linux-use/releases)** ·
 ✨ **[awesome-machin](https://github.com/javimosch/awesome-machin)**
 
-**v0.7.0** — perception (memoized collection queries + walk fallback), actuation, a
+**v0.7.1** — perception (memoized collection queries + walk fallback), actuation, a
 filterable event stream, and a warm-registry daemon, aligned to [cli-specs.intrane.fr](https://cli-specs.intrane.fr/).
 
 ## The design bet
@@ -499,6 +501,8 @@ These cost real debugging time and are the non-obvious part of this codebase.
 ## Layout
 
 ```
+.agents/skills/   an agent skill describing how to drive this tool
+contrib/          a11y-browser: launch Chromium a11y-forced, with its own profile
 src/main.src      the CLI (one file)
 lu_helpers.h      C shims: FFI string ownership + AtspiEvent accessors
 build.sh          machin encode (machweb + flags + app) -> machin build

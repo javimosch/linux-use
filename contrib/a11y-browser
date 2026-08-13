@@ -1,0 +1,92 @@
+#!/bin/sh
+# a11y-browser — launch a Chromium-family browser that linux-use can drive.
+#
+# A normally-launched Chromium/Edge exposes exactly ONE `frame` to AT-SPI: no
+# web content at all. With --force-renderer-accessibility the real DOM appears
+# and is addressable by name. The flag cannot be applied to an already-running
+# browser, and PWA windows share a process with ordinary windows, so this uses
+# a dedicated instance with its own profile.
+#
+#   a11y-browser https://example.com            # visible, profile "default"
+#   a11y-browser -n teams https://teams.microsoft.com/
+#   a11y-browser -n teams --hidden <url>        # private Xvfb display
+#   a11y-browser -n teams --stop
+#
+# The profile persists, so any login is done once.
+#
+# --hidden caveat: an Xvfb display has no window manager, so X input focus is
+# unset and KEYSTROKE synthesis will not work there. Accessible actions (`act`)
+# and clicks still do.
+
+set -e
+
+NAME=default
+MODE=visible
+URL=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-n|--name) NAME="$2"; shift 2 ;;
+		--hidden) MODE=hidden; shift ;;
+		--stop) MODE=stop; shift ;;
+		-h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+		*) URL="$1"; shift ;;
+	esac
+done
+
+STATE="${XDG_DATA_HOME:-$HOME/.local/share}/linux-use"
+PROFILE="$STATE/browser-$NAME"
+HIDDEN_DISPLAY="${A11Y_BROWSER_DISPLAY:-:98}"
+BROWSER="${A11Y_BROWSER:-$(command -v microsoft-edge || command -v microsoft-edge-stable || command -v google-chrome || command -v chromium || command -v chromium-browser)}"
+
+running_pids() {
+	pgrep -f -- "--user-data-dir=$PROFILE" 2>/dev/null | while read -r p; do
+		[ -r "/proc/$p/comm" ] && grep -qE 'msedge|chrome|chromium' "/proc/$p/comm" && echo "$p"
+	done
+}
+
+if [ "$MODE" = stop ]; then
+	pids=$(running_pids)
+	if [ -z "$pids" ]; then echo "a11y-browser[$NAME]: not running"; else
+		echo "$pids" | xargs -r kill 2>/dev/null || true
+		sleep 2; echo "a11y-browser[$NAME]: stopped"
+	fi
+	[ -f "$STATE/xvfb-$NAME.pid" ] && { kill "$(cat "$STATE/xvfb-$NAME.pid")" 2>/dev/null || true; rm -f "$STATE/xvfb-$NAME.pid"; }
+	exit 0
+fi
+
+[ -n "$BROWSER" ] || { echo "a11y-browser: no chromium-family browser found (set A11Y_BROWSER)" >&2; exit 1; }
+[ -n "$URL" ] || { echo "a11y-browser: need a URL" >&2; exit 1; }
+mkdir -p "$PROFILE" "$STATE"
+
+if [ -n "$(running_pids)" ]; then
+	echo "a11y-browser[$NAME]: already running"; exit 0
+fi
+
+if [ "$MODE" = hidden ]; then
+	command -v Xvfb >/dev/null || { echo "a11y-browser: --hidden needs Xvfb" >&2; exit 1; }
+	# A private XDG_RUNTIME_DIR is NOT optional: at-spi-bus-launcher uses a fixed
+	# per-user socket path, so a shared one lets this instance's teardown delete
+	# the real session's accessibility socket.
+	RUNDIR="$STATE/xdg-$NAME"; mkdir -p "$RUNDIR"; chmod 700 "$RUNDIR"
+	XDG_RUNTIME_DIR="$RUNDIR"; export XDG_RUNTIME_DIR
+	if [ ! -f "$STATE/xvfb-$NAME.pid" ] || ! kill -0 "$(cat "$STATE/xvfb-$NAME.pid" 2>/dev/null)" 2>/dev/null; then
+		Xvfb "$HIDDEN_DISPLAY" -screen 0 1600x1000x24 -nolisten tcp >"$STATE/xvfb-$NAME.log" 2>&1 &
+		echo $! > "$STATE/xvfb-$NAME.pid"; sleep 1
+	fi
+	TARGET="$HIDDEN_DISPLAY"
+	echo "a11y-browser[$NAME]: hidden on $TARGET (no WM: keystrokes will NOT work; use act/click)"
+else
+	TARGET="${DISPLAY:-:0}"
+	echo "a11y-browser[$NAME]: visible on $TARGET"
+fi
+
+DISPLAY="$TARGET" setsid "$BROWSER" \
+	--user-data-dir="$PROFILE" \
+	--force-renderer-accessibility \
+	--no-first-run --no-default-browser-check \
+	--class="a11y-browser-$NAME" \
+	"$URL" >"$STATE/browser-$NAME.log" 2>&1 &
+
+sleep 1
+echo "a11y-browser[$NAME]: launched (profile $PROFILE)"
+echo "  verify: linux-use apps    # the browser should appear once the window is up"

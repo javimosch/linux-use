@@ -1,3 +1,5 @@
-app.mfl
-linux-use
-spike/linux-use-spike
+# Anchored to the repo root: a bare "linux-use" would also match
+# .agents/skills/linux-use/ and silently drop the shipped skill.
+/linux-use
+/app.mfl
+/spike/linux-use-spike
