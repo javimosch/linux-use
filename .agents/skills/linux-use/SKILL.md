@@ -120,10 +120,27 @@ serve | daemon start|stop|status
 5. **Verify focus before `sendtext`.** It types wherever focus happens to be —
    a stray space presses whatever button is focused. Check `focused:true` in
    `state` first. (`type <ref>` verifies for you and fails with `focus_refused`.)
-6. **Some widgets lie about their text.** A rich contenteditable (Teams' compose
+6. **`focus_refused` usually means the WINDOW is not active, not the widget.**
+   An element can report `focused:true` (focused *within* its window) while the
+   terminal still owns the X focus — keystrokes would go to the terminal, and
+   `type` correctly refuses. `act` cannot fix this: it needs no focus, but XTEST
+   keystrokes (`paste`/`sendtext`) still follow the active window. Raise the
+   window first, then confirm it:
+   ```sh
+   linux-use click <ref>            # a click raises the window it lands on
+   linux-use windows                # require active:true on the target window
+   linux-use paste '<text>'
+   ```
+   When two windows fully overlap, a coordinate `click` hits whichever is on top
+   — close or move the other one first rather than guessing.
+7. **Opening or closing a window restages sibling indices.** Closing window `/1`
+   renumbered `/0`'s children and staled an already-captured ref (`ref_not_found`,
+   exit 84). Re-run `find`/`state` after any window count change, not just after
+   in-page navigation.
+8. **Some widgets lie about their text.** A rich contenteditable (Teams' compose
    box) always reads as the empty placeholder `￼` no matter what it holds. Do
    not verify input by reading it back; verify the *effect* afterwards instead.
-7. **`watch` memory grows ~0.14 kB/event inside libatspi**, not in the tool. For
+9. **`watch` memory grows ~0.14 kB/event inside libatspi**, not in the tool. For
    long-lived listeners pass `--max-rss <kB>` and restart on exit 90.
 
 Exit codes: `0` ok · `80` usage/ambiguous · `81` no_a11y · `82` app_not_found ·
@@ -145,7 +162,23 @@ microsoft-edge --user-data-dir=~/.local/share/linux-use/edge-<app> \
   --force-renderer-accessibility --no-first-run https://example.com &
 ```
 
-This repo ships a launcher that does the above correctly:
+**Alternative — relaunch the user's own browser on its DEFAULT profile.** A
+dedicated profile starts logged out, which is painful for an app like Teams. If
+the user already has the session open, closing their browser and relaunching it
+with the flag keeps every login and tab:
+
+```sh
+# check tabs will come back: session.restore_on_startup must be 1
+python3 -c "import json;print(json.load(open('$HOME/.config/microsoft-edge/Default/Preferences'))['session']['restore_on_startup'])"
+kill -TERM <browser-pid>          # graceful, so the session is saved
+microsoft-edge --force-renderer-accessibility --restore-last-session &
+```
+
+Back the open URLs up first (`strings ~/.config/<browser>/Default/Sessions/Session_*`)
+in case restore misbehaves — it may restore fewer windows than were open. Ask
+before killing a user's browser.
+
+This repo also ships a launcher for the dedicated-profile approach:
 
 ```sh
 contrib/a11y-browser -n teams https://teams.microsoft.com/
@@ -164,7 +197,13 @@ accessibility socket.
    items, so a plain `state` looks empty.
 3. `act` the chat whose name contains the person.
 4. **Confirm the right conversation** by finding a known message among `static`
-   elements. The window title lags and cannot be trusted.
+   elements. The window title lags and cannot be trusted — two Teams windows both
+   reported `(1) Calendar | Microsoft Teams` while showing *different* chats, and
+   `find <person>` matched a header list-item in both. Worse, the compose box
+   reporting `focused:true` belonged to the **wrong** conversation, so a blind
+   `paste`+Send would have posted into an unrelated group chat. Always identify
+   the window by its message content (`state --all --role static`, filtered on the
+   `Microsoft Edge:/N` ref prefix) and act only on refs from that window.
 5. `click <compose-box-ref>`, confirm `focused:true`.
 6. `paste` the text.
 7. `act` the `Send (Ctrl+Enter)` button.
