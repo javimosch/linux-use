@@ -64,7 +64,12 @@ up)
     if [ -n "$(ours)" ]; then
         echo "session: already up on $GEN_DISPLAY (pid $(ours))"
     else
-        if pgrep -x chrome >/dev/null 2>&1 || pgrep -x google-chrome >/dev/null 2>&1; then
+        # Only a real BROWSER process holds the profile. Chrome's utility and
+        # zygote children are also named `chrome` and outlive the parent by a
+        # few seconds after a shutdown, so a bare `pgrep -x chrome` reports the
+        # profile as busy when nothing is actually using it -- which refused a
+        # perfectly good run seconds after the previous one was stopped.
+        if pgrep -a -x chrome 2>/dev/null | grep -qv -- "--type="; then
             echo "session: Chrome is already running on another display." >&2
             echo "          This needs its default profile, which one process owns at" >&2
             echo "          a time. Close Chrome and try again." >&2

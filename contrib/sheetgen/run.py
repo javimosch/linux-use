@@ -92,10 +92,15 @@ def state():
         return []
 
 
+# Anything narrower than this is a thumbnail, an avatar, a citation card or a
+# placeholder that has not painted yet -- not the generated image.
+MIN_IMAGE = 420
+
+
 def image_geometry(els=None):
     """The rect of the generated image, as the page reports it."""
     for e in els if els is not None else state():
-        if e.get("role") == "image" and (e.get("w") or 0) > 300:
+        if e.get("role") == "image" and (e.get("w") or 0) >= MIN_IMAGE:
             return e["x"], e["y"], e["w"], e["h"]
     return None
 
@@ -155,13 +160,30 @@ def submit(prompt, tries=3):
 
 
 def await_image(timeout=300):
+    """Wait for the image to appear AND to stop changing size.
+
+    The element exists before it has painted: one run captured a 334x206 black
+    placeholder, sliced it, and wrote two solid-black "heroes" without a word
+    of complaint. So appearing is not enough -- the geometry has to be stable
+    across two polls before the picture is really there."""
     deadline = time.time() + timeout
+    last = None
+    stable = 0
     while time.time() < deadline:
         time.sleep(5)
         els = state()
         g = image_geometry(els)
-        if g:
-            return g, els
+        if not g:
+            last = None
+            stable = 0
+            continue
+        if g == last:
+            stable += 1
+            if stable >= 2:
+                return g, els
+        else:
+            stable = 0
+        last = g
     return None, state()
 
 
@@ -219,8 +241,25 @@ def capture(path):
     im = Image.open(shot)
     if im.width < x + w or im.height < y + h:
         raise RuntimeError(f"capture is {im.size}, image rect is {(x, y, w, h)}")
-    im.crop((x, y, x + w, y + h)).save(path)
+    crop = im.crop((x, y, x + w, y + h))
+    blank(crop)
+    crop.save(path)
     return w, h
+
+
+def blank(im):
+    """Refuse a frame that is all one colour.
+
+    The cheapest possible check for the failure mode that costs the most: a
+    placeholder, a blanked compositor or a capture of the wrong thing produces
+    a uniform rectangle, which slices into perfectly clean assets that are
+    perfectly useless. Anything genuinely generated has spread in at least one
+    channel."""
+    ext = im.convert("RGB").getextrema()
+    spread = max(hi - lo for lo, hi in ext)
+    if spread < 12:
+        raise RuntimeError(f"captured a blank frame (channel spread {spread}) -- "
+                           "the image had not painted yet")
 
 
 # ── one image, no job file ───────────────────────────────────────────────
