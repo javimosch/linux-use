@@ -63,6 +63,17 @@ Adding an asset is adding a file. `grid` × `grid` tiles are cut and written as
 Three example jobs are included: portraits (photographic, opaque), sprites
 (flat art, chroma-keyed), textures (photographic, seamless).
 
+## Choosing `grid` is a resolution decision
+
+The page renders every sheet at a fixed size whatever the grid, so the grid
+decides detail per asset: 4×4 → ~177px each, 3×3 → ~236px, 2×2 → ~354px,
+1 → ~708px. Aim for ~1.5–2× the largest size the asset is ever drawn at. Ten
+full-body figures were three 2×2 sheets rather than one 4×4, because 177px
+cannot carry a standing character.
+
+A name list shorter than `grid²` stops early, which is how a count that is not
+a perfect square is expressed.
+
 ## Why sheets
 
 **One prompt, sixteen assets.** Not a quota trick — it is the only reliable
