@@ -1,0 +1,8 @@
+{
+  "name": "portraits_blue",
+  "out": "assets/portraits",
+  "prefix": "blue",
+  "grid": 4,
+  "size": 256,
+  "prompt": "Generate one single square image: a 4x4 grid of 16 separate ID-card portraits of fictional soldiers of a modern multinational infantry company. Head and shoulders, each face centred in its own cell, looking straight at the camera, neutral expression, even frontal lighting, plain dark neutral grey background. Mixed ages 19-45, mixed genders, mixed ethnicities, all in the SAME olive-green combat uniform with no insignia. No helmets, no sunglasses, no text, no captions, no numbers, no watermark, no borders or gutters between the cells. Photorealistic, gritty documentary style, identical framing and identical lighting in all 16 cells."
+}

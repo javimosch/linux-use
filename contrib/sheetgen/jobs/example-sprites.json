@@ -1,0 +1,15 @@
+{
+  "name": "unit_blue",
+  "out": "assets/sprites",
+  "prefix": "unit_blue",
+  "grid": 2,
+  "size": 256,
+  "chroma": "auto",
+  "names": [
+    "inf",
+    "light",
+    "tank",
+    "wreck"
+  ],
+  "prompt": "Generate one single square image: a 2x2 grid of four board-game unit tokens seen from DIRECTLY ABOVE, bird's eye view, orthographic, no perspective. Top left: a single soldier from directly overhead, so you see the top of the helmet and the shoulders, facing toward the top of the cell. Top right: a small four-wheeled reconnaissance car from directly overhead, facing toward the top of the cell. Bottom left: a tracked armoured vehicle from directly overhead with its turret facing toward the top of the cell. Bottom right: the burnt-out blackened wreck of that same tracked vehicle from directly overhead. All four in the same olive-green livery, clean flat vector illustration with bold readable silhouettes and no fine detail, no shadows, no ground, no text, no numbers, no borders or gutters. Every cell is filled edge to edge with a FLAT PURE MAGENTA background, hex FF00FF, absolutely uniform with no gradient and no vignette."
+}

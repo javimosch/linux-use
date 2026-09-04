@@ -1,0 +1,20 @@
+{
+  "name": "ground",
+  "out": "assets/textures",
+  "prefix": "ground",
+  "grid": 3,
+  "size": 256,
+  "names": [
+    "grass",
+    "meadow",
+    "stubble",
+    "plough",
+    "dirt",
+    "gravel",
+    "cobble",
+    "mud",
+    "sand"
+  ],
+  "prompt": "Generate one single square image: a 3x3 grid of nine flat overhead ground textures, seen from DIRECTLY ABOVE, orthographic, each one filling its whole cell with nothing standing on it. In reading order: lush green summer pasture grass; a green flowering meadow with small pale wildflowers; a harvested field of pale golden wheat stubble; freshly ploughed dark brown earth with parallel furrows; a bare pale dirt farm track; loose grey gravel; old grey cobblestones; wet dark brown mud; dry pale sandy soil. Photographic and finely detailed, evenly lit with no shadows, no highlights, no horizon, no sky, no objects, no text, no borders or gutters between the cells. Each texture must be even in tone right across its own cell so that it can be tiled without a visible seam.",
+  "seamless": true
+}
