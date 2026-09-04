@@ -137,17 +137,63 @@ serve | daemon start|stop|status
    renumbered `/0`'s children and staled an already-captured ref (`ref_not_found`,
    exit 84). Re-run `find`/`state` after any window count change, not just after
    in-page navigation.
-8. **Some widgets lie about their text.** A rich contenteditable (Teams' compose
-   box) always reads as the empty placeholder `￼` no matter what it holds. Do
-   not verify input by reading it back; verify the *effect* afterwards instead.
+8. **Some widgets lie about their text, and some lie about being acted on.** A
+   rich contenteditable (Teams' compose box) always reads as the empty
+   placeholder `￼` no matter what it holds. Worse, **`Return` in such a
+   composer silently fails to submit** — roughly one time in three in Gemini —
+   and `key` reports success either way. Never verify input by reading it back
+   and never trust a keystroke's return code: verify the *effect* (the text
+   appearing in the conversation, the message actually sent), and retry,
+   re-clicking the field first because a paste re-renders it and the click is
+   what restores focus.
 9. **`watch` memory grows ~0.14 kB/event inside libatspi**, not in the tool. For
    long-lived listeners pass `--max-rss <kB>` and restart on exit 90.
+10. **A page's own Download button often cannot be fired at all.** On Gemini's
+   generated images: `act` returns `ok` and does nothing; `click` demonstrably
+   lands — the hover tooltip appears in a screenshot of the display — and does
+   nothing; nor does the right-click menu (no menu ever enters the tree), nor
+   "Copy image" (the clipboard keeps whatever was already in it), nor two
+   clicks in a row, nor hovering first. Do not keep fighting it. Take the
+   pixels **off the screen**, cropped to the rectangle the tree reports for
+   the element (see the browser section below).
+11. **Wheel events scroll pages that keys cannot.** `Page_Down` and `End` do
+   nothing when a scroll container never takes keyboard focus — but
+   `click --x N --y N --button 5` (4 for up) does, because a wheel event goes
+   to whatever is under the pointer. This is often the only way to bring
+   something taller than the viewport into one frame.
+12. **An element exists in the tree BEFORE it has painted.** Geometry present
+   is not content present: a generated image was captured as a 334×206 black
+   placeholder and sliced into solid-black assets with no error anywhere.
+   Require the reported geometry to be **stable across two polls**, set a
+   minimum size worth taking seriously (a thumbnail, avatar or citation card
+   will clear a low threshold), and reject a near-uniform frame — max
+   per-channel spread under ~12 is the cheapest possible check for this whole
+   family, and it costs four lines.
 
 Exit codes: `0` ok · `80` usage/ambiguous · `81` no_a11y · `82` app_not_found ·
 `83` ref_stale · `84` ref_not_found · `85` no_capability · `86` action_failed ·
 `87` no_display · `88` daemon · `89` refused · `90` rss_limit.
 
 ## Browsers and web apps
+
+### Two rules for anything that captures or kills
+
+**Capture the browser's own window, never the root window.** `import -window
+root` grabs whatever is stacked on top, so anything else drawing on that
+display ends up in your capture — a headless game frame once overwrote a batch
+of generated assets with perfectly clean, perfectly useless pixels and no
+error. Get the id from `xwininfo -root -children` (take the widest match on the
+title; the browser also owns small helper windows) and give the automation its
+**own display** — the first fixes the symptom, the second the cause.
+
+**Never `pkill -f -- --force-renderer-accessibility`.** Other browsers on the
+machine may carry that flag for unrelated work, and this takes them down too;
+it has happened. Match the binary as well
+(`google-chrome.*--force-renderer-accessibility`) and prefer a pidfile written
+at launch. Related: `pgrep -x chrome` matches Chrome's own zygote and utility
+children — they are named `chrome` too and outlive the parent by seconds — so
+a profile-lock check built on it reports the profile busy when nothing holds
+it. Ignore anything carrying `--type=`.
 
 **A normally-launched Chromium/Edge exposes exactly one `frame` — zero web
 content.** It must be started with `--force-renderer-accessibility`; then the
@@ -256,6 +302,11 @@ working one.
    and an explicit table of what is verified vs untested.
 3. **Issues** — <https://github.com/javimosch/linux-use/issues>. Wayland support
    is [#1](https://github.com/javimosch/linux-use/issues/1) and open.
+4. **The `sheetgen` skill** — a worked application of everything above:
+   generating images with no API key by driving a signed-in model in a
+   browser. `contrib/sheetgen/` in this repo. Every landmine here that
+   concerns capture, scrolling, silent submission failure and process
+   matching was found building it.
 
 > On the original author's machine the same caveats are also mirrored into a
 > local memgraph project (`memgraph recall "<topic>" --project linux-use`).
