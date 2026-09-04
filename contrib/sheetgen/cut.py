@@ -149,7 +149,9 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--prefix", required=True)
     ap.add_argument("--grid", type=int, default=4)
-    ap.add_argument("--size", type=int, default=256)
+    ap.add_argument("--size", type=int, default=256,
+                    help="output size on the longest side; 0 keeps whatever "
+                         "resolution the page rendered")
     ap.add_argument("--names", default="",
                     help="comma-separated tile names; falls back to 00,01,...")
     ap.add_argument("--chroma", default="",
@@ -191,7 +193,9 @@ def main() -> int:
                 int(a.chroma[0:2], 16), int(a.chroma[2:4], 16), int(a.chroma[4:6], 16))
             tile = key_out(tile, key, a.tol, a.feather)
             tile = fit_bbox(tile) if a.fit == "bbox" else trim(tile, a.pad)
-        if a.fit == "bbox":
+        if a.size <= 0:
+            pass                                    # keep it as captured
+        elif a.fit == "bbox":
             k = a.size / max(tile.size)
             tile = tile.resize((max(1, int(tile.width * k)), max(1, int(tile.height * k))),
                                Image.LANCZOS)

@@ -1,13 +1,24 @@
-# sheetgen — generated image assets, no API key, no LLM in the loop
+# sheetgen — generated images, no API key, no LLM in the loop
 
-Ask a signed-in image model for **one contact sheet** and cut it into N named
-files. Driven through [linux-use](https://github.com/javimosch/linux-use) on a
-private X display, so the browser session you already have *is* the API.
+Drive an image model you are already signed into, through
+[linux-use](https://github.com/javimosch/linux-use) on a private X display, so
+the browser session you already have *is* the API.
+
+**One image:**
 
 ```sh
-./session.sh up                     # browser on its own display
-./run.py jobs/*.json                # generate everything missing
+./session.sh up
+./run.py --image "a lunar rover crossing the Mun, 1930s Art Deco travel-poster style" \
+         --out art/rover.png
 ./session.sh down                   # ALWAYS
+```
+
+**Many assets** — ask for one contact sheet and cut it into N named files:
+
+```sh
+./session.sh up
+./run.py jobs/*.json                # generate everything missing
+./session.sh down
 ```
 
 ```sh
@@ -16,6 +27,18 @@ private X display, so the browser session you already have *is* the API.
 ./run.py --recut   jobs/*.json      # re-slice saved sheets, generate nothing
 ./run.py --root /path/to/repo jobs/*.json
 ```
+
+`--image` takes `--out`, and optionally `--size` (longest side; 0 keeps what
+the page rendered) and `--edge` (pixels trimmed off each side — the page draws
+images in a container with **rounded corners**, and the capture is a rectangle,
+so without this every plain image arrives with four dark corner arcs). It is
+the same machinery with `grid: 1` and nothing keyed or trimmed, so it inherits
+the submit-verification, the scrolling and the window capture; `--recut` works
+on it too, which means a wrong `--edge` is fixed without asking the model again.
+
+The model returns whatever aspect ratio it likes for a plain prompt — the
+capture uses the rectangle the page reports for the image element, so
+non-square comes back intact.
 
 Paths in a job's `out` resolve against `--root` / `$GEN_ROOT` / the current
 directory; captured sheets go to `$GEN_SHEETS` (default `docs/sheets/`).

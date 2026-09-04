@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
-"""run.py -- generate every asset in a queue of job files, unattended.
+"""run.py -- generate images through a signed-in browser, unattended.
+
+One image:
 
     tools/gen/session.sh up
+    tools/gen/run.py --image "a lunar rover, 1930s poster style" --out art/rover.png
+
+A queue of asset jobs:
+
     tools/gen/run.py tools/gen/jobs/*.json
     tools/gen/run.py --force tools/gen/jobs/unit_blue.json
     tools/gen/run.py --dry-run tools/gen/jobs/*.json
@@ -217,13 +223,62 @@ def capture(path):
     return w, h
 
 
+# ── one image, no job file ───────────────────────────────────────────────
+# Everything else here is built around asking for a GRID and cutting it, which
+# is the right shape for game assets and the wrong shape for "I want a
+# picture of X". A single image is that same machinery with grid 1, nothing
+# keyed out, nothing trimmed, and no resize -- so it is expressed as a job
+# rather than as a second code path, and gets the same submit-verification,
+# scrolling and window capture for free.
+def one_shot(prompt, out, size=0, edge=14):
+    out = os.path.abspath(out)
+    stem, ext = os.path.splitext(os.path.basename(out))
+    return {
+        "name": stem or "image",
+        "prompt": prompt,
+        "out": os.path.dirname(out) or ".",
+        "prefix": stem or "image",
+        "grid": 1,
+        "size": size,
+        "inset": 0,
+        "fit": "bbox",
+        # The page draws images in a container with ROUNDED CORNERS, and the
+        # capture is a rectangle, so a few pixels of the container's dark
+        # background come with every corner. For a grid that lands inside cells
+        # the inset already trims; for a single image it is the picture's own
+        # corners, so it has to be trimmed here and it has to be enough to
+        # clear the radius.
+        "edge": edge,
+        "_single": out,
+    }
+
+
 def outputs(job):
+    if job.get("_single"):
+        return [job["_single"]]
     names = job.get("names") or [f"{i:02d}" for i in range(job.get("grid", 4) ** 2)]
     d = os.path.join(ROOT, job["out"])
     return [os.path.join(d, f"{job['prefix']}_{n}.png") for n in names if n != "-"]
 
 
 def cut_sheet(job, sheet):
+    if job.get("_single"):
+        # A grid of one, cut to the frame the page actually drew. The sheet is
+        # already exactly the image; copying it through the cutter keeps the
+        # edge trim (the page draws images in a rounded container) in one place.
+        dst = job["_single"]
+        os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+        im = Image.open(sheet)
+        e = int(job.get("edge", 14))
+        if e > 0:
+            im = im.crop((e, e, im.width - e, im.height - e))
+        if job.get("size"):
+            k = job["size"] / max(im.size)
+            im = im.resize((max(1, int(im.width * k)), max(1, int(im.height * k))),
+                           Image.LANCZOS)
+        im.save(dst)
+        print(f"   1 -> {dst}  ({im.width}x{im.height})")
+        return
     args = [sheet, "--out", os.path.join(ROOT, job["out"]), "--prefix", job["prefix"],
             "--grid", str(job.get("grid", 4)), "--size", str(job.get("size", 256))]
     if job.get("names"):
@@ -243,7 +298,14 @@ def cut_sheet(job, sheet):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("jobs", nargs="+")
+    ap.add_argument("jobs", nargs="*")
+    ap.add_argument("--image", default="", help="a single prompt; skips job files")
+    ap.add_argument("--out", default="", help="where --image is written")
+    ap.add_argument("--size", type=int, default=0,
+                    help="longest side for --image; 0 keeps what the page rendered")
+    ap.add_argument("--edge", type=int, default=14,
+                    help="pixels trimmed off each side of a --image capture, to "
+                         "clear the rounded corners of the page's image container")
     ap.add_argument("--force", action="store_true", help="regenerate even if the assets exist")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--root", default="", help="resolve job `out` paths against this "
@@ -259,14 +321,23 @@ def main() -> int:
     if a.sheets:
         SHEETS = a.sheets
 
-    paths = []
-    for pat in a.jobs:
-        paths.extend(sorted(glob.glob(pat)) or [pat])
+    if a.image:
+        if not a.out:
+            print("--image needs --out", file=sys.stderr)
+            return 2
+        jobs = [(a.out, one_shot(a.image, a.out, a.size, a.edge))]
+    else:
+        if not a.jobs:
+            print("give job files, or --image PROMPT --out PATH", file=sys.stderr)
+            return 2
+        jobs = []
+        for pat in a.jobs:
+            for p in sorted(glob.glob(pat)) or [pat]:
+                with open(p) as fh:
+                    jobs.append((p, json.load(fh)))
 
     failed = []
-    for p in paths:
-        with open(p) as fh:
-            job = json.load(fh)
+    for p, job in jobs:
         name = job.get("name") or os.path.splitext(os.path.basename(p))[0]
         outs = outputs(job)
         sheet = os.path.join(ROOT, SHEETS, f"{name}.png")
