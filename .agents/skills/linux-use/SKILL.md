@@ -169,6 +169,13 @@ serve | daemon start|stop|status
    will clear a low threshold), and reject a near-uniform frame — max
    per-channel spread under ~12 is the cheapest possible check for this whole
    family, and it costs four lines.
+13. **Two apps with the same name: AT-SPI is a per-user bus.** When a
+   dedicated-profile browser runs on a virtual display alongside the user's
+   real browser, both appear in `linux-use apps` with the same name.
+   `linux-use state --app "Microsoft Edge"` fails with `app_ambiguous`
+   (exit 80). Disambiguate with `--app "Microsoft Edge#pid<PID>"` or
+   `--pid <PID>`. Get the PID from the launcher's pidfile or
+   `pgrep -f --user-data-dir=<profile>`.
 
 Exit codes: `0` ok · `80` usage/ambiguous · `81` no_a11y · `82` app_not_found ·
 `83` ref_stale · `84` ref_not_found · `85` no_capability · `86` action_failed ·
@@ -228,7 +235,7 @@ This repo also ships a launcher for the dedicated-profile approach:
 
 ```sh
 contrib/a11y-browser -n teams https://teams.microsoft.com/
-contrib/a11y-browser -n teams --hidden <url>   # private Xvfb (no WM: keystrokes will NOT work)
+contrib/a11y-browser -n teams --hidden <url>   # private Xvfb (add --wm for keystroke support; see Virtual desktop sessions below)
 contrib/a11y-browser -n teams --stop
 ```
 
@@ -257,6 +264,78 @@ accessibility socket.
 
 Element names often embed their own shortcuts (`Send (Ctrl+Enter)`) — a free
 source of reliable key combos.
+
+### Virtual desktop sessions (Xvfb + WM)
+
+When a fleet or daemon needs to drive a browser without interfering with the
+user's real one, run it on a virtual display. The critical insight:
+**Xvfb alone is not enough** — without a window manager, X input focus is
+unset and `type`/`paste`/`key` all fail. You need a WM.
+
+**Xvfb + xfwm4 (headless, keystrokes work):**
+
+```sh
+Xvfb :98 -screen 0 1600x1000x24 -nolisten tcp &
+DISPLAY=:98 xfwm4 &   # any lightweight WM: xfwm4, openbox, fluxbox
+DISPLAY=:98 XDG_RUNTIME_DIR=~/.local/share/linux-use/xdg-myapp \
+  microsoft-edge --user-data-dir=~/.local/share/linux-use/edge-myapp \
+  --force-renderer-accessibility --no-first-run --disable-gpu https://example.com &
+```
+
+**Xephyr (visible nested window, for one-time login):**
+
+```sh
+Xephyr :98 -screen 1600x1000x24 -title "virtual Edge" &   # appears as a window on the real desktop
+DISPLAY=:98 xfwm4 &
+DISPLAY=:98 microsoft-edge --user-data-dir=<profile> --force-renderer-accessibility https://reddit.com/login &
+# user logs in once in the Xephyr window, then stop it and switch to headless Xvfb
+```
+
+**Required env for linux-use to target the virtual display:**
+
+```sh
+DISPLAY=:98 XDG_RUNTIME_DIR=~/.local/share/linux-use/xdg-myapp linux-use state --app "Microsoft Edge#pid<PID>"
+```
+
+**Three rules:**
+
+1. **Always run a WM.** Without one, `act` and `click` work but `type`,
+   `paste`, and `key` silently fail or hit the wrong target. xfwm4 is
+   verified; openbox and fluxbox should work but are not tested.
+2. **Private `XDG_RUNTIME_DIR` is mandatory.** `at-spi-bus-launcher` uses a
+   fixed per-user socket path. Without isolation, tearing the virtual
+   environment down deletes the real session's accessibility socket.
+3. **Disambiguate by PID.** AT-SPI is per-user, so both the real and virtual
+   browser appear in `linux-use apps`. Use `--app "Microsoft Edge#pid<N>"`
+   or `--pid <N>`. See landmine #13 above.
+
+The `contrib/a11y-browser --hidden --wm` flag automates this pattern.
+
+### Driving a signed-in web session without an API
+
+When a site has no API (or the API needs a token you don't have), linux-use
+can drive the user's logged-in browser session directly. Key learnings:
+
+**Prefer "classic" UIs over "modern" ones.** old.reddit.com exposes 784
+elements (standard `entry` textareas, `save` buttons, post titles as `link`
++ `static` pairs). new.reddit.com exposes 417 elements with contenteditable
+divs that don't appear as `entry` or `text area` in the tree. If a site has
+a classic/legacy UI, use it.
+
+**Identify post titles by link+static pairs.** On old reddit, post titles
+appear as both a `link` and a `static` element with identical text. Sidebar
+links appear only as `link`. Filtering for links whose name also exists in
+the `static` set reliably separates content from navigation:
+
+```python
+static_names = {e['name'] for e in elements if e['role'] == 'static' and len(e['name']) > 20}
+post_titles = [e for e in elements if e['role'] == 'link' and e['name'] in static_names]
+```
+
+**Comment boxes on old reddit are unnamed `entry` elements.** Filter out the
+address bar (name contains "address") and search filter (name contains
+"search"/"filter"). The remaining `entry` is the comment textarea. The
+`save` button is a `push button` named exactly `save`.
 
 ## Testing safely
 

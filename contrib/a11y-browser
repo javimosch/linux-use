@@ -10,25 +10,35 @@
 #   a11y-browser https://example.com            # visible, profile "default"
 #   a11y-browser -n teams https://teams.microsoft.com/
 #   a11y-browser -n teams --hidden <url>        # private Xvfb display
+#   a11y-browser -n teams --hidden --wm <url>   # Xvfb + WM (keystrokes work)
+#   a11y-browser -n teams --xephyr <url>        # visible nested window (for login)
 #   a11y-browser -n teams --stop
 #
 # The profile persists, so any login is done once.
 #
-# --hidden caveat: an Xvfb display has no window manager, so X input focus is
-# unset and KEYSTROKE synthesis will not work there. Accessible actions (`act`)
-# and clicks still do.
+# --hidden without --wm: no window manager, so X input focus is unset and
+# KEYSTROKE synthesis (type/paste/key) will NOT work. Accessible actions
+# (`act`) and clicks still do. Pass --wm to start a window manager (default:
+# xfwm4) so keystrokes function.
+#
+# --xephyr: runs Xephyr as a visible nested window on the real desktop, so the
+# user can interact with the virtual browser (e.g. for one-time login). Then
+# stop and restart with --hidden for headless operation.
 
 set -e
 
 NAME=default
 MODE=visible
+USE_WM=false
 URL=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 		-n|--name) NAME="$2"; shift 2 ;;
 		--hidden) MODE=hidden; shift ;;
+		--xephyr) MODE=xephyr; shift ;;
+		--wm) USE_WM=true; shift ;;
 		--stop) MODE=stop; shift ;;
-		-h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+		-h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 		*) URL="$1"; shift ;;
 	esac
 done
@@ -51,6 +61,7 @@ if [ "$MODE" = stop ]; then
 		sleep 2; echo "a11y-browser[$NAME]: stopped"
 	fi
 	[ -f "$STATE/xvfb-$NAME.pid" ] && { kill "$(cat "$STATE/xvfb-$NAME.pid")" 2>/dev/null || true; rm -f "$STATE/xvfb-$NAME.pid"; }
+	[ -f "$STATE/wm-$NAME.pid" ] && { kill "$(cat "$STATE/wm-$NAME.pid")" 2>/dev/null || true; rm -f "$STATE/wm-$NAME.pid"; }
 	exit 0
 fi
 
@@ -62,23 +73,69 @@ if [ -n "$(running_pids)" ]; then
 	echo "a11y-browser[$NAME]: already running"; exit 0
 fi
 
-if [ "$MODE" = hidden ]; then
-	command -v Xvfb >/dev/null || { echo "a11y-browser: --hidden needs Xvfb" >&2; exit 1; }
-	# A private XDG_RUNTIME_DIR is NOT optional: at-spi-bus-launcher uses a fixed
-	# per-user socket path, so a shared one lets this instance's teardown delete
-	# the real session's accessibility socket.
-	RUNDIR="$STATE/xdg-$NAME"; mkdir -p "$RUNDIR"; chmod 700 "$RUNDIR"
-	XDG_RUNTIME_DIR="$RUNDIR"; export XDG_RUNTIME_DIR
-	if [ ! -f "$STATE/xvfb-$NAME.pid" ] || ! kill -0 "$(cat "$STATE/xvfb-$NAME.pid" 2>/dev/null)" 2>/dev/null; then
-		Xvfb "$HIDDEN_DISPLAY" -screen 0 1600x1000x24 -nolisten tcp >"$STATE/xvfb-$NAME.log" 2>&1 &
-		echo $! > "$STATE/xvfb-$NAME.pid"; sleep 1
+WM_BIN="${A11Y_BROWSER_WM:-$(command -v xfwm4 || command -v openbox || command -v fluxbox)}"
+
+start_wm() {
+	# Start a window manager on the virtual display so X input focus works.
+	# Without a WM, type/paste/key silently fail — only act/click work.
+	if [ -z "$WM_BIN" ]; then
+		echo "a11y-browser[$NAME]: WARNING: no WM found (xfwm4/openbox/fluxbox); keystrokes will NOT work" >&2
+		return 0
 	fi
-	TARGET="$HIDDEN_DISPLAY"
-	echo "a11y-browser[$NAME]: hidden on $TARGET (no WM: keystrokes will NOT work; use act/click)"
-else
-	TARGET="${DISPLAY:-:0}"
-	echo "a11y-browser[$NAME]: visible on $TARGET"
-fi
+	if [ -f "$STATE/wm-$NAME.pid" ] && kill -0 "$(cat "$STATE/wm-$NAME.pid" 2>/dev/null)" 2>/dev/null; then
+		return 0  # already running
+	fi
+	DISPLAY="$HIDDEN_DISPLAY" XDG_RUNTIME_DIR="$RUNDIR" \
+		"$WM_BIN" >"$STATE/wm-$NAME.log" 2>&1 &
+	echo $! > "$STATE/wm-$NAME.pid"; sleep 1
+	if kill -0 "$(cat "$STATE/wm-$NAME.pid")" 2>/dev/null; then
+		echo "a11y-browser[$NAME]: WM started ($(basename "$WM_BIN"), pid $(cat "$STATE/wm-$NAME.pid"))"
+	else
+		echo "a11y-browser[$NAME]: WARNING: WM exited immediately; check $STATE/wm-$NAME.log" >&2
+	fi
+}
+
+case "$MODE" in
+	hidden)
+		command -v Xvfb >/dev/null || { echo "a11y-browser: --hidden needs Xvfb" >&2; exit 1; }
+		# A private XDG_RUNTIME_DIR is NOT optional: at-spi-bus-launcher uses a fixed
+		# per-user socket path, so a shared one lets this instance's teardown delete
+		# the real session's accessibility socket.
+		RUNDIR="$STATE/xdg-$NAME"; mkdir -p "$RUNDIR"; chmod 700 "$RUNDIR"
+		XDG_RUNTIME_DIR="$RUNDIR"; export XDG_RUNTIME_DIR
+		if [ ! -f "$STATE/xvfb-$NAME.pid" ] || ! kill -0 "$(cat "$STATE/xvfb-$NAME.pid" 2>/dev/null)" 2>/dev/null; then
+			Xvfb "$HIDDEN_DISPLAY" -screen 0 1600x1000x24 -nolisten tcp >"$STATE/xvfb-$NAME.log" 2>&1 &
+			echo $! > "$STATE/xvfb-$NAME.pid"; sleep 1
+		fi
+		TARGET="$HIDDEN_DISPLAY"
+		if [ "$USE_WM" = true ]; then
+			start_wm
+			echo "a11y-browser[$NAME]: hidden on $TARGET with WM (keystrokes work)"
+		else
+			echo "a11y-browser[$NAME]: hidden on $TARGET (no WM: keystrokes will NOT work; use --wm to enable)"
+		fi
+		;;
+	xephyr)
+		command -v Xephyr >/dev/null || { echo "a11y-browser: --xephyr needs Xephyr" >&2; exit 1; }
+		RUNDIR="$STATE/xdg-$NAME"; mkdir -p "$RUNDIR"; chmod 700 "$RUNDIR"
+		XDG_RUNTIME_DIR="$RUNDIR"; export XDG_RUNTIME_DIR
+		if [ ! -f "$STATE/xvfb-$NAME.pid" ] || ! kill -0 "$(cat "$STATE/xvfb-$NAME.pid" 2>/dev/null)" 2>/dev/null; then
+			Xephyr "$HIDDEN_DISPLAY" -screen 1600x1000x24 \
+				-title "a11y-browser-$NAME" \
+				>"$STATE/xvfb-$NAME.log" 2>&1 &
+			echo $! > "$STATE/xvfb-$NAME.pid"; sleep 1
+		fi
+		TARGET="$HIDDEN_DISPLAY"
+		start_wm  # always start WM in xephyr mode so the user can interact
+		echo "a11y-browser[$NAME]: Xephyr on $TARGET (visible nested window, WM active)"
+		echo "a11y-browser[$NAME]: log in once, then stop and restart with --hidden --wm for headless"
+		;;
+	*)
+		TARGET="${DISPLAY:-:0}"
+		RUNDIR=""; # no XDG_RUNTIME_DIR override for visible mode
+		echo "a11y-browser[$NAME]: visible on $TARGET"
+		;;
+esac
 
 DISPLAY="$TARGET" setsid "$BROWSER" \
 	--user-data-dir="$PROFILE" \
@@ -88,5 +145,10 @@ DISPLAY="$TARGET" setsid "$BROWSER" \
 	"$URL" >"$STATE/browser-$NAME.log" 2>&1 &
 
 sleep 1
-echo "a11y-browser[$NAME]: launched (profile $PROFILE)"
-echo "  verify: linux-use apps    # the browser should appear once the window is up"
+BROWSER_PID=$!
+echo "$BROWSER_PID" > "$STATE/browser-$NAME.pid"
+echo "a11y-browser[$NAME]: launched (profile $PROFILE, pid $BROWSER_PID)"
+echo "  verify: DISPLAY=$TARGET XDG_RUNTIME_DIR=$RUNDIR linux-use apps"
+if [ "$MODE" != visible ]; then
+	echo "  target: linux-use state --app \"$(basename "$BROWSER")#pid$BROWSER_PID\""
+fi
