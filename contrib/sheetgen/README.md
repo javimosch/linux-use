@@ -7,18 +7,34 @@ the browser session you already have *is* the API.
 **One image:**
 
 ```sh
-./session.sh up
 ./run.py --image "a lunar rover crossing the Mun, 1930s Art Deco travel-poster style" \
-         --out art/rover.png
-./session.sh down                   # ALWAYS
+         --out art/rover.png --ensure-session
 ```
 
-**Many assets** — ask for one contact sheet and cut it into N named files:
+**Many independent images** — a JSON list, each generated separately with
+automatic retry + session restart + quota detection (agents love this):
 
 ```sh
-./session.sh up
+./run.py --batch jobs/images.json --ensure-session
+./run.py --batch jobs/images.json --dry-run     # what would be generated
+./run.py --batch jobs/images.json --json        # NDJSON per image, parseable
+./run.py --batch jobs/images.json --account wallentine   # fail fast on wrong account
+```
+
+```json
+[
+  {"name": "rover",  "prompt": "a lunar rover, Art Deco poster style", "out": "art/rover.png",  "size": 600},
+  {"name": "castle", "prompt": "a fairy-tale castle at dawn",           "out": "art/castle.png", "size": 600, "retries": 5}
+]
+```
+
+Per-item options: `size` (longest side), `edge` (corner trim), `timeout`,
+`retries`.
+
+**Many grid assets** — ask for one contact sheet and cut it into N named files:
+
+```sh
 ./run.py jobs/*.json                # generate everything missing
-./session.sh down
 ```
 
 ```sh
@@ -27,6 +43,16 @@ the browser session you already have *is* the API.
 ./run.py --recut   jobs/*.json      # re-slice saved sheets, generate nothing
 ./run.py --root /path/to/repo jobs/*.json
 ```
+
+**Session handling for agents:**
+- `--ensure-session` brings the browser session up automatically (and restarts
+  it between retries) — no manual `session.sh up` needed.
+- `--account <substring>` reads the signed-in account and aborts (exit 3) if
+  it does not match, before generating anything. Pair with `--ensure-session`.
+- `session.sh status` now reports the signed-in account;
+  `session.sh account` prints just the account line.
+- `lu.sh` no longer inherits the agent shell's `DISPLAY=:0`: it targets
+  `GEN_DISPLAY` / `:98` so clicks never land on the human's real desktop.
 
 `--image` takes `--out`, and optionally `--size` (longest side; 0 keeps what
 the page rendered) and `--edge` (pixels trimmed off each side — the page draws

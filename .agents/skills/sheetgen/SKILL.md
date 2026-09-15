@@ -19,17 +19,26 @@ Works for **one ordinary picture** as well as for batches of game assets.
 
 ```sh
 SG=~/ai/machin-linux-use/contrib/sheetgen
-$SG/session.sh up
 
-# one image
+# one image (session brought up automatically)
 $SG/run.py --image "a lunar rover crossing the Mun, 1930s Art Deco travel-poster style" \
-           --out art/rover.png
+           --out art/rover.png --ensure-session
 
-# many assets, from job files
+# many INDEPENDENT images, from a JSON list (agents: this is the one)
+$SG/run.py --batch jobs/images.json --ensure-session
+$SG/run.py --batch jobs/images.json --json        # NDJSON per image, parseable
+$SG/run.py --batch jobs/images.json --account wallentine   # fail fast if wrong account
+
+# many grid assets, from job files (contact sheet cut into N files)
 cd <your project> && $SG/run.py jobs/*.json
-
-$SG/session.sh down            # ALWAYS
 ```
+
+`--batch` items: `{name, prompt, out, size?, edge?, timeout?, retries?}`.
+`--ensure-session` brings the session up and restarts it between retries, so
+an agent never needs to run `session.sh up`/`down` by hand.
+`--account <substring>` reads the signed-in account and aborts (exit 3) if it
+does not match — pair with `--ensure-session` to guard against the browser
+landing on the wrong profile account.
 
 `--dry-run` lists what is missing · `--force` regenerates · `--recut`
 re-slices saved sheets without generating · `--root` sets where job `out`
@@ -163,6 +172,22 @@ Everything after the pixels arrive is, and that is where the value is:
 10. **Never `pkill -f <browser flag>`.** Other browsers may carry
    `--force-renderer-accessibility` for unrelated work. Match the binary too,
    and prefer a pidfile.
+11. **Agents inherit `DISPLAY=:0`** (the human's real desktop) from their
+   shell, so `lu.sh` and any raw `linux-use` call that does not force the
+   display will silently drive the human's screen instead of the generator's
+   `:98` virtual display. `lu.sh` now overrides `:0` → `:98` (or
+   `$GEN_DISPLAY`); when writing your own calls, pass `DISPLAY="$GEN_DISPLAY"`
+   explicitly.
+12. **A fresh `session.sh up` lands on the profile's FIRST account**, not
+   necessarily the one you want. Headless/automation Chrome (puppeteer,
+   playwright, e2e) runs with `--user-data-dir` into `/tmp` and does NOT hold
+   the default profile, so it must not block `session.sh up` — only a Chrome
+   with no `--user-data-dir` at all is a real conflict. Use
+   `--account <substring>` to fail fast on the wrong account.
+13. **Quota exhaustion is not retryable.** "Image Generation Limit Reached"
+   (and friends) means restarting the session will not mint more quota — stop
+   the batch and report. `--batch` already classifies this and stops cleanly;
+   the account quota is daily, so resume the same command the next day.
 
 ## Keying, if you write your own
 

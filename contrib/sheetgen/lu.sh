@@ -10,8 +10,19 @@
 #   lu.sh act  "Send message"
 #   lu.sh click "Enter a prompt for Gemini"
 #   lu.sh ref  "Download"          # print the ref only
+#
+# DISPLAY resolution: GEN_DISPLAY wins (matches session.sh / run.py), then
+# the :98 virtual display, then whatever the shell already has. Agents run
+# with DISPLAY=:0 (the real desktop) in their environment, and silently
+# driving the HUMAN's desktop instead of the generator's virtual display is
+# how clicks end up on the wrong screen.
 set -euo pipefail
-: "${DISPLAY:=:99}"
+if [ -n "${GEN_DISPLAY:-}" ]; then
+    export DISPLAY="$GEN_DISPLAY"
+elif [ "${DISPLAY:-}" = ":0" ]; then
+    export DISPLAY=":98"
+fi
+: "${DISPLAY:=:98}"
 export DISPLAY
 APP="${LU_APP:-Google Chrome}"
 verb="$1"; shift

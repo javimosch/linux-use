@@ -58,6 +58,7 @@ APP = "Google Chrome"
 # The composer bar floats over the bottom of the viewport. A sheet whose bottom
 # edge is below this line comes back with its last row of tiles eaten.
 SAFE_BOTTOM = 900
+HERE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def lu(*args, check=False):
@@ -66,6 +67,44 @@ def lu(*args, check=False):
     if check and r.returncode != 0:
         raise RuntimeError(f"linux-use {args[0]}: {r.stdout.strip() or r.stderr.strip()}")
     return r
+
+
+def session(*args, timeout=120):
+    """Restart (or query) the browser session that run.py drives.
+
+    Agents habitually forget `session.sh up` / `down`, and a stale or dead
+    session is the #1 cause of "composer not found" flakiness. run.py can
+    bring its own session up (and restart it between retries) so the caller
+    only has to think about it when they want to.
+    """
+    env = dict(os.environ, DISPLAY=DISPLAY)
+    try:
+        r = subprocess.run(["bash", os.path.join(HERE_DIR, "session.sh"), *args],
+                           capture_output=True, text=True, env=env, timeout=timeout)
+        return r
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def session_up():
+    session("up")
+
+
+def session_restart():
+    session("down")
+    session("up")
+
+
+def signed_in_account():
+    """The email (or None) of the account currently signed in on the page."""
+    for e in state():
+        name = e.get("name") or ""
+        if "Google Account:" in name:
+            import re
+            m = re.search(r"\(([^)]+@[^)]+)\)", name)
+            if m:
+                return m.group(1)
+    return None
 
 
 def find_act(verb, query, role=None):
@@ -262,6 +301,73 @@ def blank(im):
                            "the image had not painted yet")
 
 
+# ── retrying a single prompt ─────────────────────────────────────────────
+# The page flakes in a handful of reproducible ways: the composer does not
+# come up, the submit does not take, the image vanishes between scroll and
+# capture, or a blank frame is captured. Each is retryable by restarting the
+# session -- and restarting is cheap (a few seconds) compared to a five-minute
+# await that fails. Quota exhaustion is NOT retryable: restarting will not
+# mint more quota, so stop the whole run the moment the page says so.
+
+QUOTA_HINTS = ("limit", "quota", "rate limit", "too many", "try again later")
+
+
+def classify_failure(els):
+    """Return 'quota' if the page is complaining about limits, else None."""
+    why = page_text(els, limit=10).lower()
+    if any(h in why for h in QUOTA_HINTS):
+        return "quota"
+    return None
+
+
+def generate_one(prompt, out, size=0, edge=14, timeout=300, retries=3,
+                 json_out=False, ensure_session=False, name=None):
+    """Generate one image with retry + session restart. Returns (ok, why)."""
+    if ensure_session:
+        session_up()
+    for attempt in range(1, retries + 1):
+        try:
+            submit(prompt)
+            g, els = await_image(timeout)
+            if not g:
+                kind = classify_failure(els)
+                why = page_text(els)
+                if kind == "quota":
+                    return False, "quota: " + why[:200]
+                raise RuntimeError(f"no image after {timeout}s: {why[:200]}")
+            if not bring_into_view():
+                raise RuntimeError("could not scroll into view")
+            out_abs = os.path.abspath(out)
+            os.makedirs(os.path.dirname(out_abs) or ".", exist_ok=True)
+            # one_shot expresses the single image as a grid-1 job; capture the
+            # sheet through the same code path and cut it to the frame.
+            job = one_shot(prompt, out, size, edge)
+            if name:
+                job["name"] = name
+            sheet = os.path.join(ROOT, SHEETS, f"{job['name']}.png")
+            os.makedirs(os.path.dirname(sheet) or ".", exist_ok=True)
+            w, h = capture(sheet)
+            cut_sheet(job, sheet)
+            if json_out:
+                print(json.dumps({"name": job["name"], "status": "ok",
+                                  "out": out_abs, "width": w, "height": h,
+                                  "attempts": attempt}))
+            return True, None
+        except Exception as exc:
+            msg = str(exc)
+            # Quota is not retryable; surface it immediately.
+            if "quota" in msg.lower() or any(h in msg.lower() for h in QUOTA_HINTS):
+                return False, msg
+            if attempt < retries:
+                print(f"   attempt {attempt}/{retries} failed ({msg[:120]}); "
+                      f"restarting session", file=sys.stderr)
+                session_restart()
+                time.sleep(5)
+            else:
+                return False, msg
+    return False, "exhausted retries"
+
+
 # ── one image, no job file ───────────────────────────────────────────────
 # Everything else here is built around asking for a GRID and cutting it, which
 # is the right shape for game assets and the wrong shape for "I want a
@@ -345,6 +451,18 @@ def main() -> int:
     ap.add_argument("--edge", type=int, default=14,
                     help="pixels trimmed off each side of a --image capture, to "
                          "clear the rounded corners of the page's image container")
+    ap.add_argument("--batch", default="",
+                    help="JSON file: a list of {name, prompt, out, size?, edge?, "
+                         "timeout?, retries?}. Each is generated and written "
+                         "independently, with retry + session restart.")
+    ap.add_argument("--account", default="",
+                    help="substring of the signed-in account email to require; "
+                         "aborts early if the browser is on a different account")
+    ap.add_argument("--json", action="store_true", dest="json_out",
+                    help="emit one NDJSON line per image instead of human text")
+    ap.add_argument("--ensure-session", action="store_true",
+                    help="run session.sh up before generating, and restart it "
+                         "between retries")
     ap.add_argument("--force", action="store_true", help="regenerate even if the assets exist")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--root", default="", help="resolve job `out` paths against this "
@@ -360,14 +478,45 @@ def main() -> int:
     if a.sheets:
         SHEETS = a.sheets
 
-    if a.image:
+    if a.account:
+        if a.ensure_session:
+            session_up()
+        acct = signed_in_account()
+        if acct is None:
+            print("account check: could not read the signed-in account; "
+                  "start the session (session.sh up) or pass --ensure-session",
+                  file=sys.stderr)
+            return 3
+        if a.account.lower() not in acct.lower():
+            print(f"account check: page is signed in as {acct}, "
+                  f"expected a match for '{a.account}'", file=sys.stderr)
+            return 3
+
+    # Normalize every request to a single-image job tuple (name, job-dict).
+    batch_opts = {}
+    if a.batch:
+        with open(a.batch) as fh:
+            items = json.load(fh)
+        jobs = []
+        for it in items:
+            out = it.get("out") or it.get("name")
+            if not out:
+                print("--batch items need 'name' and 'out'", file=sys.stderr)
+                return 2
+            name = it.get("name", os.path.splitext(os.path.basename(out))[0])
+            job = one_shot(it["prompt"], out, it.get("size", 0), it.get("edge", 14))
+            job["name"] = name
+            jobs.append((name, job))
+            batch_opts[name] = it
+    elif a.image:
         if not a.out:
             print("--image needs --out", file=sys.stderr)
             return 2
         jobs = [(a.out, one_shot(a.image, a.out, a.size, a.edge))]
     else:
         if not a.jobs:
-            print("give job files, or --image PROMPT --out PATH", file=sys.stderr)
+            print("give job files, or --batch FILE, or --image PROMPT --out PATH",
+                  file=sys.stderr)
             return 2
         jobs = []
         for pat in a.jobs:
@@ -394,6 +543,25 @@ def main() -> int:
             continue
         if have and not a.force:
             print(f"== {name}: {len(outs)} assets already present, skipping")
+            continue
+
+        # Single-image requests (--image / --batch) get the retry + session
+        # restart + quota detection path; job-file grids keep the original
+        # queue behaviour so existing gamedev flows are untouched.
+        if job.get("_single"):
+            opts = batch_opts.get(name, {})
+            if a.json_out:
+                print(json.dumps({"name": name, "status": "start"}))
+            ok, why = generate_one(job["prompt"], job["_single"],
+                                   size=job.get("size", 0), edge=job.get("edge", 14),
+                                   timeout=opts.get("timeout", 300),
+                                   retries=opts.get("retries", 3),
+                                   json_out=a.json_out, ensure_session=a.ensure_session,
+                                   name=name)
+            if not ok:
+                if a.json_out:
+                    print(json.dumps({"name": name, "status": "fail", "error": why}))
+                failed.append((name, why))
             continue
 
         print(f"== {name}: prompting")

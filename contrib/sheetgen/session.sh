@@ -69,7 +69,13 @@ up)
         # few seconds after a shutdown, so a bare `pgrep -x chrome` reports the
         # profile as busy when nothing is actually using it -- which refused a
         # perfectly good run seconds after the previous one was stopped.
-        if pgrep -a -x chrome 2>/dev/null | grep -qv -- "--type="; then
+        # Headless/automation Chrome (puppeteer/playwright/e2e) always passes
+        # --user-data-dir (usually into /tmp) and does NOT hold the default
+        # profile, so it must not block us either. Only a process with NO
+        # --user-data-dir at all is using the default profile -- a real
+        # conflict.
+        if pgrep -a -x chrome 2>/dev/null | grep -v -- "--type=" \
+            | grep -qv -- "--user-data-dir"; then
             echo "session: Chrome is already running on another display." >&2
             echo "          This needs its default profile, which one process owns at" >&2
             echo "          a time. Close Chrome and try again." >&2
@@ -113,6 +119,26 @@ status)
     pgrep -f "xfwm4 --display=$GEN_DISPLAY" >/dev/null 2>&1 && echo "wm: up" || echo "wm: down"
     p="$(ours)"
     [ -n "$p" ] && echo "browser: up (pid $p)" || echo "browser: down"
+    if [ -n "$p" ]; then
+        acct=$(DISPLAY="$GEN_DISPLAY" linux-use state --app "Google Chrome" --all --depth 45 2>/dev/null \
+            | grep -oE "Google Account: [^)]+\)" | head -1)
+        [ -n "$acct" ] && echo "account: $acct" || echo "account: (unknown -- check the page)"
+    fi
+    ;;
+account)
+    p="$(ours)"
+    if [ -z "$p" ]; then
+        echo "session is down -- start it with: session.sh up" >&2
+        exit 1
+    fi
+    acct=$(DISPLAY="$GEN_DISPLAY" linux-use state --app "Google Chrome" --all --depth 45 2>/dev/null \
+        | grep -oE "Google Account: [^)]+\)" | head -1)
+    if [ -n "$acct" ]; then
+        echo "$acct"
+    else
+        echo "unknown" >&2
+        exit 1
+    fi
     ;;
 *)  sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac

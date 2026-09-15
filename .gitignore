@@ -3,3 +3,6 @@
 /linux-use
 /app.mfl
 /spike/linux-use-spike
+
+# sheetgen runtime artifacts: captured sheets are scratch, not source
+/contrib/sheetgen/docs/sheets/
