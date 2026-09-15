@@ -24,7 +24,15 @@ elif [ "${DISPLAY:-}" = ":0" ]; then
 fi
 : "${DISPLAY:=:98}"
 export DISPLAY
-APP="${LU_APP:-Google Chrome}"
+# Disambiguate our Chrome by pid when other automation Chrome runs
+# concurrently ("2 applications are named 'Google Chrome'").
+pid=""
+[ -f /tmp/gen-chrome.pid ] && pid=$(cat /tmp/gen-chrome.pid 2>/dev/null || true)
+if [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ]; then
+    APP="${LU_APP:-Google Chrome#pid$pid}"
+else
+    APP="${LU_APP:-Google Chrome}"
+fi
 verb="$1"; shift
 query="$1"; shift || true
 

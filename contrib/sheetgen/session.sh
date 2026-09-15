@@ -26,6 +26,12 @@ set -euo pipefail
 : "${GEN_URL:=https://gemini.google.com/app}"
 FLAG=--force-renderer-accessibility
 PIDFILE=/tmp/gen-chrome.pid
+# When other automation Chrome runs concurrently, linux-use needs the pid to
+# tell our instance apart ("2 applications are named 'Google Chrome'").
+app_spec() {
+    pid="$(ours)"
+    [ -n "$pid" ] && echo "Google Chrome#pid$pid" || echo "Google Chrome"
+}
 # NEVER match on the flag alone. This machine runs a Microsoft Edge with
 # --force-renderer-accessibility for unrelated work, and a `pkill -f
 # force-renderer-accessibility` would take it down with us. Match this
@@ -82,7 +88,8 @@ up)
             exit 1
         fi
         DISPLAY="$GEN_DISPLAY" nohup google-chrome "$FLAG" \
-            --disable-session-crashed-bubble --no-first-run \
+            --disable-session-crashed-bubble --disable-component-update \
+            --disable-background-networking --no-first-run --no-restore \
             --window-size="$GEN_W,$GEN_H" --window-position=0,0 \
             "$GEN_URL" >/tmp/gen-chrome.log 2>&1 &
         echo $! > "$PIDFILE"
@@ -120,7 +127,7 @@ status)
     p="$(ours)"
     [ -n "$p" ] && echo "browser: up (pid $p)" || echo "browser: down"
     if [ -n "$p" ]; then
-        acct=$(DISPLAY="$GEN_DISPLAY" linux-use state --app "Google Chrome" --all --depth 45 2>/dev/null \
+        acct=$(DISPLAY="$GEN_DISPLAY" linux-use state --app "$(app_spec)" --all --depth 45 2>/dev/null \
             | grep -oE "Google Account: [^)]+\)" | head -1)
         [ -n "$acct" ] && echo "account: $acct" || echo "account: (unknown -- check the page)"
     fi
@@ -131,7 +138,7 @@ account)
         echo "session is down -- start it with: session.sh up" >&2
         exit 1
     fi
-    acct=$(DISPLAY="$GEN_DISPLAY" linux-use state --app "Google Chrome" --all --depth 45 2>/dev/null \
+    acct=$(DISPLAY="$GEN_DISPLAY" linux-use state --app "$(app_spec)" --all --depth 45 2>/dev/null \
         | grep -oE "Google Account: [^)]+\)" | head -1)
     if [ -n "$acct" ]; then
         echo "$acct"

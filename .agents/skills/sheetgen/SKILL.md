@@ -188,6 +188,19 @@ Everything after the pixels arrive is, and that is where the value is:
    (and friends) means restarting the session will not mint more quota — stop
    the batch and report. `--batch` already classifies this and stops cleanly;
    the account quota is daily, so resume the same command the next day.
+14. **Speed is the enemy: pace like a human or the IP gets flagged.** A
+   machine-fast rhythm (instant submit→submit→submit, fixed-interval polling,
+   no pauses) is what lands the whole machine's IP on Google's "unusual
+   traffic" CAPTCHA page — which then blocks every generation until a human
+   solves it. sheetgen now sleeps jittered 2–6s between actions (tune with
+   `GEN_MIN_DELAY`/`GEN_MAX_DELAY`) and 6–12s between images. Generation
+   speed is NOT the goal; not being flagged is.
+15. **Tabs accumulate and become the memory killer.** Every "opens a new
+   tab" link, account switch and session restore leaves a tab; a long batch
+   grows into a dozen stale pages (which can also be captured instead of the
+   sheet). `session_up()`/`session_restart()` now close every tab except the
+   Gemini one, and Chrome launches with `--no-restore --disable-component-update`
+   (the "Can't update Chrome" dialog otherwise covers Gemini on every start).
 
 ## Keying, if you write your own
 

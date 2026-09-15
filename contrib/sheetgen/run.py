@@ -59,6 +59,41 @@ APP = "Google Chrome"
 # edge is below this line comes back with its last row of tiles eaten.
 SAFE_BOTTOM = 900
 HERE_DIR = os.path.dirname(os.path.abspath(__file__))
+PIDFILE = "/tmp/gen-chrome.pid"
+
+# Human-like pacing. Automating fast enough to look like a bot is what gets
+# the machine's IP CAPTCHA-flagged by Google ("unusual traffic from your
+# computer network"). Generation speed is NOT the goal -- not being flagged
+# is. All delays are jittered (uniform within [lo, hi]) so the rhythm is not
+# clockwork. Tune via GEN_MIN_DELAY / GEN_MAX_DELAY (seconds).
+PACING_MIN = float(os.environ.get("GEN_MIN_DELAY", "2"))
+PACING_MAX = float(os.environ.get("GEN_MAX_DELAY", "6"))
+
+
+def human_wait(lo=PACING_MIN, hi=PACING_MAX):
+    """Sleep a jittered 'human' amount. Also yields to the browser's own
+    animation so a ref fetched right after is less likely to be stale."""
+    import random
+    time.sleep(random.uniform(lo, hi))
+
+
+def chrome_app_spec():
+    """'Google Chrome#pid<N>' when the session's Chrome is identifiable, else
+    'Google Chrome'.
+
+    Other automation (puppeteer/playwright/e2e) may run Chrome concurrently,
+    and linux-use then refuses to act on the bare app name ("2 applications
+    are named 'Google Chrome'"). The session's own pidfile (written by
+    session.sh) disambiguates without killing anything.
+    """
+    try:
+        with open(PIDFILE) as fh:
+            pid = fh.read().strip()
+        if pid and os.path.isdir(f"/proc/{pid}"):
+            return f"Google Chrome#pid{pid}"
+    except (OSError, ValueError):
+        pass
+    return APP
 
 
 def lu(*args, check=False):
@@ -86,13 +121,40 @@ def session(*args, timeout=120):
         return None
 
 
-def session_up():
+def session_up(close_tabs=True):
     session("up")
+    if close_tabs:
+        close_extra_tabs()
 
 
-def session_restart():
+def session_restart(close_tabs=True):
     session("down")
     session("up")
+    if close_tabs:
+        close_extra_tabs()
+
+
+def close_extra_tabs(max_close=15):
+    """Close every Chrome tab except the Gemini one.
+
+    Every account switch, "opens a new tab" link and session restore leaves
+    a tab behind; over a long batch run that grows into a memory killer and,
+    worse, a dozen stale pages that can be captured instead of the sheet.
+    Tab close is the one place a keyboard shortcut is reliable: activate the
+    tab, then ctrl+w it (the browser closes the ACTIVE tab)."""
+    for _ in range(max_close):
+        tabs = []
+        for e in state():
+            if e.get("role") == "page tab":
+                tabs.append(e)
+        if len(tabs) <= 1:
+            return
+        # Keep the first (Gemini) tab; close the rest, one at a time.
+        victim = tabs[-1]
+        lu("act", victim["ref"])
+        human_wait(0.5, 1.2)
+        lu("key", "ctrl+w")
+        human_wait(0.8, 1.5)
 
 
 def signed_in_account():
@@ -124,7 +186,7 @@ def find_act(verb, query, role=None):
 
 
 def state():
-    r = lu("state", "--app", APP, "--all", "--depth", "50")
+    r = lu("state", "--app", chrome_app_spec(), "--all", "--depth", "50")
     try:
         return json.loads(r.stdout).get("elements", [])
     except (ValueError, TypeError):
@@ -176,22 +238,27 @@ def sent(prompt):
 
 
 def submit(prompt, tries=3):
+    # Human rhythm: pause before starting a new chat, type (paste) at a
+    # natural pace, and leave a beat before hitting Return. None of these
+    # need to be fast; fast is what gets the IP flagged.
+    human_wait(1.5, 3.5)
     find_act("act", "new chat")
-    time.sleep(4)
+    human_wait(2.5, 4.5)
     if find_act("click", "enter a prompt") is None:
         raise RuntimeError("composer not found -- is the session up and signed in?")
-    time.sleep(1)
+    human_wait(0.8, 1.8)
     lu("paste", prompt, check=True)
-    time.sleep(2)
+    # A human does not send instantly after finishing typing.
+    human_wait(1.5, 3.5)
     for attempt in range(tries):
         # Re-click the composer before every Return. The paste re-renders the
         # input and the click is what puts keyboard focus back into it; without
         # it the Return lands nowhere and reports success.
         find_act("click", "enter a prompt")
-        time.sleep(1)
+        human_wait(0.8, 1.6)
         lu("key", "Return", check=True)
         for _ in range(8):
-            time.sleep(2)
+            human_wait(2.0, 3.5)
             if sent(prompt):
                 return
         print(f"   submit did not take, retrying ({attempt + 1}/{tries})", file=sys.stderr)
@@ -209,7 +276,8 @@ def await_image(timeout=300):
     last = None
     stable = 0
     while time.time() < deadline:
-        time.sleep(5)
+        # Jittered poll interval: a fixed 5s cadence is clockwork.
+        human_wait(4.0, 7.0)
         els = state()
         g = image_geometry(els)
         if not g:
@@ -322,9 +390,24 @@ def classify_failure(els):
 
 def generate_one(prompt, out, size=0, edge=14, timeout=300, retries=3,
                  json_out=False, ensure_session=False, name=None):
-    """Generate one image with retry + session restart. Returns (ok, why)."""
+    """Generate one image with retry + session restart. Returns (ok, why).
+
+    Two distinct failure classes, retried differently:
+      * SUBMIT failures (composer not found, prompt never leaves the input):
+        nothing was generated, so restart the session and re-submit -- cheap.
+      * CAPTURE failures (image vanished, blank frame, geometry unstable):
+        the model already spent quota producing the image, so re-submitting
+        would double-spend. Retry by re-polling and re-capturing the SAME
+        generated image instead.
+    Quota exhaustion is not retryable in either class.
+    """
     if ensure_session:
         session_up()
+    job = one_shot(prompt, out, size, edge)
+    if name:
+        job["name"] = name
+    sheet = os.path.join(ROOT, SHEETS, f"{job['name']}.png")
+
     for attempt in range(1, retries + 1):
         try:
             submit(prompt)
@@ -337,25 +420,8 @@ def generate_one(prompt, out, size=0, edge=14, timeout=300, retries=3,
                 raise RuntimeError(f"no image after {timeout}s: {why[:200]}")
             if not bring_into_view():
                 raise RuntimeError("could not scroll into view")
-            out_abs = os.path.abspath(out)
-            os.makedirs(os.path.dirname(out_abs) or ".", exist_ok=True)
-            # one_shot expresses the single image as a grid-1 job; capture the
-            # sheet through the same code path and cut it to the frame.
-            job = one_shot(prompt, out, size, edge)
-            if name:
-                job["name"] = name
-            sheet = os.path.join(ROOT, SHEETS, f"{job['name']}.png")
-            os.makedirs(os.path.dirname(sheet) or ".", exist_ok=True)
-            w, h = capture(sheet)
-            cut_sheet(job, sheet)
-            if json_out:
-                print(json.dumps({"name": job["name"], "status": "ok",
-                                  "out": out_abs, "width": w, "height": h,
-                                  "attempts": attempt}))
-            return True, None
         except Exception as exc:
             msg = str(exc)
-            # Quota is not retryable; surface it immediately.
             if "quota" in msg.lower() or any(h in msg.lower() for h in QUOTA_HINTS):
                 return False, msg
             if attempt < retries:
@@ -363,9 +429,49 @@ def generate_one(prompt, out, size=0, edge=14, timeout=300, retries=3,
                       f"restarting session", file=sys.stderr)
                 session_restart()
                 time.sleep(5)
-            else:
-                return False, msg
+                continue
+            return False, msg
+        # The image is generated and on screen. Capture it, and on a capture
+        # flake re-capture WITHOUT re-submitting -- the model already spent
+        # quota producing this image.
+        for cattempt in range(1, retries + 1):
+            try:
+                ok = _capture_sheet(job, sheet, json_out, attempt)
+                # A human looks at the result before starting the next one;
+                # this also spaces requests out so we do not look like a bot.
+                human_wait(6.0, 12.0)
+                return ok
+            except _CaptureError as exc:
+                if cattempt < retries:
+                    print(f"   capture {cattempt}/{retries} failed "
+                          f"({str(exc)[:120]}); re-capturing", file=sys.stderr)
+                    human_wait(3.0, 6.0)
+                else:
+                    return False, str(exc)
     return False, "exhausted retries"
+
+
+class _CaptureError(RuntimeError):
+    """Raised when the image was generated but could not be captured."""
+
+
+def _capture_sheet(job, sheet, json_out, attempt):
+    """Capture + cut one generated image; raises _CaptureError on flake."""
+    try:
+        out_abs = os.path.abspath(job["_single"])
+        os.makedirs(os.path.dirname(out_abs) or ".", exist_ok=True)
+        os.makedirs(os.path.dirname(sheet) or ".", exist_ok=True)
+        w, h = capture(sheet)
+        cut_sheet(job, sheet)
+    except Exception as exc:
+        # Blank-frame, vanished-image, geometry races and cut failures are all
+        # "the image is there, go look again" -- never re-spend quota.
+        raise _CaptureError(str(exc))
+    if json_out:
+        print(json.dumps({"name": job["name"], "status": "ok",
+                          "out": out_abs, "width": w, "height": h,
+                          "attempts": attempt}))
+    return True, None
 
 
 # ── one image, no job file ───────────────────────────────────────────────

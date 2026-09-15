@@ -53,6 +53,14 @@ Per-item options: `size` (longest side), `edge` (corner trim), `timeout`,
   `session.sh account` prints just the account line.
 - `lu.sh` no longer inherits the agent shell's `DISPLAY=:0`: it targets
   `GEN_DISPLAY` / `:98` so clicks never land on the human's real desktop.
+- Sessions pace like a human (jittered 2–6s between actions, 6–12s between
+  images) to avoid Google's IP CAPTCHA flagging; tune with
+  `GEN_MIN_DELAY` / `GEN_MAX_DELAY`. Extra browser tabs are closed
+  automatically after session start/restart (memory hygiene).
+- Google CAPTCHA-flagged the machine's IP at least once from rapid automated
+  use. When the composer is unreachable and the page says "unusual traffic
+  from your computer network", a human must solve the CAPTCHA once in the
+  browser; then it clears for the whole IP.
 
 `--image` takes `--out`, and optionally `--size` (longest side; 0 keeps what
 the page rendered) and `--edge` (pixels trimmed off each side — the page draws
