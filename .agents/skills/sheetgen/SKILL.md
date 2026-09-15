@@ -52,6 +52,18 @@ wrong trim costs nothing to fix. The model returns whatever aspect ratio it
 likes and that comes back intact — the capture uses the rectangle the page
 reports for the image element, not a square assumption.
 
+## Videos too
+
+The same browser-driven flow generates **videos** (Gemini Veo) — paste a
+reference image, prompt a short clip, click "Download video" for the real
+MP4 (1280x720, ~10s, h264+aac). Videos take 1–3+ min, likeness is looser
+than images, the Download button is flaky (fresh session + single click),
+screen capture does NOT work for video (playback can't be started
+synthetically), and Chrome saves the file as `.com.google.Chrome.<random>`
+(no .mp4 extension) — set `prompt_for_download: false` + `default_directory`
+in Chrome Preferences, then find/rename the temp file. Full details:
+`memgraph recall "video generation" --project linux-use`.
+
 ## The one idea
 
 **Ask for a GRID, never for an image.** One prompt yields sixteen assets. Not
