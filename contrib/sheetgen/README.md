@@ -62,6 +62,18 @@ Per-item options: `size` (longest side), `edge` (corner trim), `timeout`,
   from your computer network", a human must solve the CAPTCHA once in the
   browser; then it clears for the whole IP.
 
+**Account policy (protect precious accounts):**
+- Config: `~/.config/sheetgen/accounts.json` (override `$GEN_ACCOUNTS`):
+  ```json
+  {"preferred": "groundswallentine", "blacklist": ["arancibiajav"]}
+  ```
+- `preferred` / `blacklist` are substring-matched against the signed-in email.
+- With `--ensure-session`, the browser is switched to `preferred` before any
+  generation; a blacklisted account is never generated on (the run aborts if
+  the switch away fails).
+- `session.sh account` shows the signed-in account; `session.sh switch <substr>`
+  switches manually.
+
 `--image` takes `--out`, and optionally `--size` (longest side; 0 keeps what
 the page rendered) and `--edge` (pixels trimmed off each side — the page draws
 images in a container with **rounded corners**, and the capture is a rectangle,

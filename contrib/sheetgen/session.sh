@@ -147,5 +147,24 @@ account)
         exit 1
     fi
     ;;
+switch)
+    p="$(ours)"
+    if [ -z "$p" ]; then
+        echo "session is down -- start it with: session.sh up" >&2
+        exit 1
+    fi
+    if [ $# -lt 2 ]; then
+        echo "usage: session.sh switch <email-substring>" >&2
+        exit 2
+    fi
+    want="$2"
+    DISPLAY="$GEN_DISPLAY" python3 -c "
+import sys; sys.path.insert(0, '$(dirname "$0")')
+from run import switch_account
+ok, detail = switch_account('$want')
+print(f'switched to {detail}' if ok else f'failed: {detail}')
+sys.exit(0 if ok else 1)
+"
+    ;;
 *)  sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac

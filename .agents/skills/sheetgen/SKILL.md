@@ -201,6 +201,16 @@ Everything after the pixels arrive is, and that is where the value is:
    sheet). `session_up()`/`session_restart()` now close every tab except the
    Gemini one, and Chrome launches with `--no-restore --disable-component-update`
    (the "Can't update Chrome" dialog otherwise covers Gemini on every start).
+16. **Respect the account policy — some accounts are precious.** sheetgen
+   reads `~/.config/sheetgen/accounts.json` (`$GEN_ACCOUNTS` to override):
+   `{"preferred": "groundswallentine", "blacklist": ["arancibiajav"]}`.
+   Substring-matched against the signed-in email. Before every batch
+   (`--ensure-session`) the browser is switched to `preferred`; a blacklisted
+   account is never generated on (if the switch away fails, the run aborts).
+   `session.sh account` shows who is signed in; `session.sh switch <substr>`
+   switches manually. Google's account switcher lists other accounts as
+   "(opens a new tab)" links — the current account is a "Collapse accounts"
+   button and must not be matched when switching.
 
 ## Keying, if you write your own
 

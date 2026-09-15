@@ -121,21 +121,56 @@ def session(*args, timeout=120):
         return None
 
 
-def session_up(close_tabs=True):
+def session_up(close_tabs=True, enforce_policy=True):
     session("up")
     if close_tabs:
         close_extra_tabs()
+    if enforce_policy:
+        return enforce_account_policy()
+    return True, "session up"
 
 
-def session_restart(close_tabs=True):
+def session_restart(close_tabs=True, enforce_policy=True):
     session("down")
     session("up")
     if close_tabs:
         close_extra_tabs()
+    if enforce_policy:
+        return enforce_account_policy()
+    return True, "session restarted"
+
+
+def enforce_account_policy():
+    """Switch to the configured preferred account; never GENERATE on a
+    blacklisted one. Returns (ok, detail).
+
+    Switching accounts is safe navigation (read-only clicks on the avatar and
+    the chooser) -- it does not spend quota or touch the account's data. The
+    danger is generating while signed in as a precious account, which is what
+    the check on the other side of the switch protects against. So we may
+    switch AWAY from a blacklisted account, but if no switch is possible we
+    refuse to proceed rather than generate on it."""
+    policy = load_account_policy()
+    if not policy["preferred"] and not policy["blacklist"]:
+        return True, "no account policy configured"
+    acct = signed_in_account()
+    if acct is None:
+        return False, "could not read the signed-in account"
+    allowed, reason = account_allowed(acct)
+    if allowed:
+        return True, acct
+    if not policy["preferred"]:
+        # Blacklisted and no preferred to switch to: block, do not drive it.
+        return False, f"signed in as {acct} which is {reason}"
+    ok, detail = switch_account(policy["preferred"])
+    if ok:
+        return True, detail
+    # Could not switch away -- the session is still on the blocked account.
+    return False, f"signed in as {acct} ({reason}); failed to switch: {detail}"
 
 
 def close_extra_tabs(max_close=15):
-    """Close every Chrome tab except the Gemini one.
+    """Close every Chrome tab except the ACTIVE one.
 
     Every account switch, "opens a new tab" link and session restore leaves
     a tab behind; over a long batch run that grows into a memory killer and,
@@ -144,17 +179,26 @@ def close_extra_tabs(max_close=15):
     tab, then ctrl+w it (the browser closes the ACTIVE tab)."""
     for _ in range(max_close):
         tabs = []
+        active = None
         for e in state():
             if e.get("role") == "page tab":
                 tabs.append(e)
+                if e.get("focused"):
+                    active = e
         if len(tabs) <= 1:
             return
-        # Keep the first (Gemini) tab; close the rest, one at a time.
-        victim = tabs[-1]
-        lu("act", victim["ref"])
-        human_wait(0.5, 1.2)
-        lu("key", "ctrl+w")
-        human_wait(0.8, 1.5)
+        # Keep the tab the user is actually on (e.g. the one an account
+        # switch just opened, which is the LAST tab, not the first); close
+        # the rest, one at a time.
+        keep = active if active is not None else tabs[-1]
+        for victim in tabs:
+            if victim["ref"] == keep["ref"]:
+                continue
+            lu("act", victim["ref"])
+            human_wait(0.5, 1.2)
+            lu("key", "ctrl+w")
+            human_wait(0.8, 1.5)
+            break  # re-fetch state after each close; refs go stale
 
 
 def signed_in_account():
@@ -167,6 +211,96 @@ def signed_in_account():
             if m:
                 return m.group(1)
     return None
+
+
+# ── account policy ───────────────────────────────────────────────────────
+# Some signed-in accounts are precious and must never be driven (the owner's
+# personal Google account is one bad keystroke away from a lockout); others
+# are throwaway generators meant to be used freely. sheetgen honours a small
+# config file so an agent never has to be told twice:
+#
+#   ~/.config/sheetgen/accounts.json   (override: $GEN_ACCOUNTS)
+#   {"preferred": "groundswallentine", "blacklist": ["arancibiajav"]}
+#
+# Both are SUBSTRING matches against the signed-in email. On startup (and
+# before every batch) the browser is switched to `preferred` if the current
+# account is blacklisted or simply not preferred. Blacklist always wins: a
+# blacklisted account is never driven, even if it happens to be preferred.
+
+DEFAULT_ACCOUNTS_PATH = os.path.expanduser("~/.config/sheetgen/accounts.json")
+
+
+def load_account_policy():
+    path = os.environ.get("GEN_ACCOUNTS") or DEFAULT_ACCOUNTS_PATH
+    try:
+        with open(path) as fh:
+            cfg = json.load(fh)
+        return {
+            "preferred": str(cfg.get("preferred") or "").lower(),
+            "blacklist": [str(x).lower() for x in cfg.get("blacklist", [])],
+        }
+    except (OSError, ValueError):
+        return {"preferred": "", "blacklist": []}
+
+
+def account_allowed(acct):
+    """(allowed, reason) for a signed-in email under the configured policy."""
+    policy = load_account_policy()
+    acct = (acct or "").lower()
+    for bad in policy["blacklist"]:
+        if bad and bad in acct:
+            return False, f"blacklisted ({bad})"
+    if policy["preferred"] and policy["preferred"] not in acct:
+        return False, (f"not preferred ({policy['preferred']})"
+                       if not policy["blacklist"] else
+                       f"not the preferred generator account ({policy['preferred']})")
+    return True, ""
+
+
+def switch_account(email_substr, max_tries=3):
+    """Switch the browser to a different signed-in Google account.
+
+    Gemini's account switcher is a two-step link: click the account avatar
+    ("Google Account: ..."), which opens the chooser listing every signed-in
+    account, then click the target account ("... (opens a new tab)"). The
+    switch opens a new tab; close_extra_tabs() cleans up afterwards."""
+    import re
+    for _ in range(max_tries):
+        # 1. Open the account chooser from the avatar in the sidebar.
+        avatar = None
+        for e in state():
+            name = e.get("name") or ""
+            if name.startswith("Google Account:"):
+                avatar = e
+                break
+        if avatar is None:
+            return False, "no account avatar found"
+        lu("act", avatar["ref"])
+        human_wait(2.0, 3.5)
+        # 2. Click the target account in the chooser. The switchable entries
+        # are the "(opens a new tab)" links; the CURRENT account appears as a
+        # "Collapse accounts" button and must not be matched (clicking it
+        # collapses the chooser instead of switching).
+        target = None
+        for e in state():
+            name = e.get("name") or ""
+            low = name.lower()
+            if email_substr.lower() in low and "opens a new tab" in low:
+                target = e
+                break
+        if target is None:
+            lu("key", "Escape")  # close the chooser
+            return False, f"account '{email_substr}' not in the chooser"
+        lu("act", target["ref"])
+        human_wait(3.0, 5.0)
+        # 3. Confirm the switch actually happened.
+        acct = signed_in_account()
+        if acct and email_substr.lower() in acct.lower():
+            close_extra_tabs()
+            return True, acct
+        # The switch opened a tab we are now on; the account may lag a beat.
+        human_wait(2.0, 3.0)
+    return False, f"could not switch to '{email_substr}'"
 
 
 def find_act(verb, query, role=None):
@@ -402,7 +536,17 @@ def generate_one(prompt, out, size=0, edge=14, timeout=300, retries=3,
     Quota exhaustion is not retryable in either class.
     """
     if ensure_session:
-        session_up()
+        ok, detail = session_up()
+        if not ok:
+            return False, detail
+    else:
+        # Session is assumed up; still never drive a blacklisted account.
+        acct = signed_in_account()
+        if acct is not None:
+            allowed, reason = account_allowed(acct)
+            if not allowed and load_account_policy()["blacklist"] \
+                    and any(b and b in acct.lower() for b in load_account_policy()["blacklist"]):
+                return False, f"refusing to drive {acct} ({reason})"
     job = one_shot(prompt, out, size, edge)
     if name:
         job["name"] = name
@@ -596,6 +740,13 @@ def main() -> int:
         if a.account.lower() not in acct.lower():
             print(f"account check: page is signed in as {acct}, "
                   f"expected a match for '{a.account}'", file=sys.stderr)
+            return 3
+    elif a.ensure_session:
+        # No explicit --account: still honour the configured account policy
+        # (preferred + blacklist) so a precious account is never driven.
+        ok, detail = enforce_account_policy()
+        if not ok:
+            print(f"account policy: {detail}", file=sys.stderr)
             return 3
 
     # Normalize every request to a single-image job tuple (name, job-dict).
