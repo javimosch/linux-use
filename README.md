@@ -108,6 +108,14 @@ movement, and **it works while the window is fully occluded by another window**.
 `click` synthesizes a real XTEST pointer event and is the fallback for widgets
 that expose no action. Prefer `act`.
 
+## Recipes
+
+[javimosch/linux-use-recipes](https://github.com/javimosch/linux-use-recipes)
+collects field-tested patterns: a headless Xvfb browser linux-use can drive,
+the AT-SPI gotchas that silently break automations (offscreen elements, paste
+semantics, missing WM), posting a Reddit comment end-to-end, and verifying
+actions server-side.
+
 ## Commands
 
 ```
