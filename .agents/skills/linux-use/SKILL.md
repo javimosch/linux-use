@@ -229,7 +229,16 @@ microsoft-edge --force-renderer-accessibility --restore-last-session &
 
 Back the open URLs up first (`strings ~/.config/<browser>/Default/Sessions/Session_*`)
 in case restore misbehaves — it may restore fewer windows than were open. Ask
-before killing a user's browser.
+before killing a user's browser. And check the RIGHT process name first: Edge
+is `msedge` (pgrep for `microsoft-edge` matches nothing while it runs).
+
+**NEVER automate the live profile with Playwright/CDP.** A Playwright launch
+against a real `~/.config/<browser>` profile forces `--use-mock-keychain`;
+the cookie DB becomes undecryptable, Chromium treats it as corrupt and RESETS
+it — every site session wiped, unrecoverable (`SQLITE_SECURE_DELETE` zeroes
+rows in place; no WAL, no snapshots). Confirmed in production 2026-10-04.
+Use `contrib/a11y-browser` (dedicated profile) or a throwaway profile COPY.
+AT-SPI driving (this tool) is safe: it touches no profile internals.
 
 This repo also ships a launcher for the dedicated-profile approach:
 

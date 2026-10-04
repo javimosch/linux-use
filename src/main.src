@@ -123,7 +123,7 @@ var ST_VISIBLE = 30
 var COORD_SCREEN = 0
 var KEY_STRING = 4
 
-var VERSION = "0.7.1"
+var VERSION = "0.7.2"
 var SCHEMA = "linux-use/v1"
 
 // ---------------------------------------------------------------- json utils
@@ -2134,6 +2134,7 @@ func guide_json() (r) {
 	g = append(g, jstr("For a label whose NAME IS ITS TEXT, the fingerprint changes whenever the text changes, so a ref captured from an event will report ref_stale on the next read. That is the mechanism working: the staleness IS the signal that the content changed. Re-run state, or drop the #fingerprint to address the path alone."))
 	g = append(g, jstr("OBSERVER EFFECT: reading the tree (state/find) can itself make toolkits emit accessibility events. If you run 'watch' while also polling 'state', expect self-induced noise — especially object:state-changed:*, which is why it is not in the default event set."))
 	g = append(g, jstr("Large apps (browsers) have huge trees. Use --role, --depth, or 'find' rather than dumping everything; a truncated walk warns on stderr and sets truncated:true."))
+	g = append(g, jstr("NEVER automate the user's LIVE browser profile with Playwright/CDP: the forced --use-mock-keychain makes the cookie DB undecryptable and Chromium RESETS it (all site sessions wiped, unrecoverable — secure_delete zeroes deleted rows). Same for --user-data-dir=<real profile>. Always use a dedicated profile dir (contrib/a11y-browser) or a throwaway COPY of the profile. Driving the live session via AT-SPI (this tool) is safe; it touches no profile internals. Also note: the Edge process is 'msedge', not 'microsoft-edge' — a pgrep for the latter sees nothing while the browser is running."))
 	c = append(c, jkv("gotchas", jarr(g)))
 
 	e := []string{}
@@ -2171,6 +2172,8 @@ func guide_human() (r) {
 	ls = append(ls, "  SHOWING != visible to the user (an occluded widget is still SHOWING).")
 	ls = append(ls, "  0 elements means 'no accessibility', not 'empty window'.")
 	ls = append(ls, "  key needs X11. Wayland: use act.")
+	ls = append(ls, "  NEVER point Playwright/CDP at the user's LIVE browser profile — it wipes")
+	ls = append(ls, "  the cookie DB (undecryptable under --use-mock-keychain -> reset). Copy first.")
 	ls = append(ls, "")
 	ls = append(ls, "Run 'linux-use guide' for the full JSON version, 'linux-use help-json' for the surface.")
 	r = join(ls, "\n")
