@@ -434,8 +434,15 @@ v1.2.1, built from source):
 
 | page | linux-use `state` | linux-use `state --expand` | linux-use `state --via cdp` | flashbrowse `open` |
 |---|---|---|---|---|
-| 300-row table (1,500 widgets) | 0.7 s — 568 elements: rows ~0–54, the rest never entered the AT-SPI tree | ~6 s — **all 300 rows (3,018 elements)** | **0.4 s — all 900 widgets, full document** | ~1.4 s incl. cold Chrome spawn — **all 1,200 actions** |
+| 300-row table (1,500 widgets) | 0.7 s — 568 elements: rows ~0–54, the rest never entered the AT-SPI tree | ~6 s — **all 300 rows (3,018 elements)** | **0.4 s — all 900 widgets, full document** | ~1.3 s incl. cold Chrome spawn — **all 1,200 actions** |
+| MDN HTML reference (real) | — | — | 0.37 s — 422 elements | 2.7–4.7 s — 150 actions |
+| Wikipedia population list (heavy) | 0.48 s — 120 elements (viewport only) | — | 0.48 s — 1,767 elements | 5.1–9.4 s — 1,954 actions |
 | 3,000-row table (15,000 widgets) | 0.85 s — same ~560-element window; `--all` 4.6 s, truncated at 20k nodes | incremental (per-viewport scrolls, no all-or-nothing fetch) | one DOM query, same shape | no output in 90 s — full-AX-tree fetch/settle never finished |
+
+Warm `act` is a bigger gap than cold `state`: linux-use fires a DOM click
+through a ref that carries its own address (~70 ms median), while
+flashbrowse re-fetches the whole AX tree to rebuild its action map on every
+`act` call (~850 ms measured on the same session).
 
 `state --via cdp` skips the AX tree entirely: one `Runtime.evaluate` DOM
 query returns every interactive element with document coordinates and an
