@@ -4,141 +4,228 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>linux-use — agent-first GUI control for Linux</title>
-<meta name="description" content="Agent-first, CLI-first GUI control for Linux desktops via the AT-SPI2 accessibility tree. A single static binary built with machin (MFL). The Linux answer to Windows-Use.">
-<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<meta name="description" content="Agent-first GUI control for Linux desktops: AT-SPI2 perception and actuation plus a 60ms CDP DOM fast path. A single 229 KB static binary built with machin (MFL). The Linux answer to Windows-Use.">
+<link rel="icon" type="image/png" href="assets/icon.png">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <style>
   body { font-family: 'Geist', system-ui, sans-serif; }
   code, pre { font-family: 'Geist Mono', ui-monospace, monospace; }
-  .card { background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.01)); border: 1px solid rgba(255,255,255,.07); }
-  .card:hover { border-color: rgba(59,130,246,.35); }
+  .card { background: #0a0a0a; border: 1px solid #1f2937; transition: all .3s; }
+  .card:hover { border-color: rgba(34,197,94,.5); transform: translateY(-2px); }
+  .tagchip { font-family:'Geist Mono',monospace; font-size:11px; letter-spacing:.06em;
+             padding:4px 10px; border-radius:6px; border:1px solid #1f2937; color:#9ca3af; background:#111; }
 </style>
 </head>
-<body class="bg-[#08080a] text-slate-100 antialiased">
+<body class="bg-[#050505] text-slate-100 antialiased">
 
-<div class="max-w-5xl mx-auto px-6 py-16">
-
-  <header class="mb-14">
-    <div class="flex items-center gap-3 mb-5 flex-wrap">
-      <span class="text-xs font-medium px-2.5 py-1 rounded-full bg-blue-500/10 text-blue-300 border border-blue-500/20">v0.7.1</span>
-      <span class="text-xs font-medium px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">154 KB static binary</span>
-      <span class="text-xs font-medium px-2.5 py-1 rounded-full bg-white/5 text-slate-400 border border-white/10">MIT</span>
+<!-- nav -->
+<nav class="border-b border-[#1f2937] sticky top-0 z-20 bg-[#050505]/90 backdrop-blur">
+  <div class="max-w-5xl mx-auto px-6 h-14 flex items-center gap-4">
+    <a href="index.html" class="flex items-center gap-2.5 font-semibold text-white text-[15px] hover:text-[#86efac] transition-colors">
+      <img src="assets/icon.png" alt="" class="w-6 h-6 rounded">linux-use
+    </a>
+    <div class="ml-auto flex items-center gap-5 text-sm">
+      <a href="changelog.html" class="text-gray-500 hover:text-white transition-colors">Changelog</a>
+      <a href="https://github.com/javimosch/linux-use" class="text-gray-500 hover:text-white transition-colors">GitHub</a>
+      <a href="https://github.com/javimosch/linux-use/releases/latest" class="px-3 py-1.5 rounded-md bg-[#22c55e] text-black font-semibold hover:bg-[#86efac] transition-colors">Download</a>
     </div>
-    <h1 class="text-5xl sm:text-6xl font-bold text-white tracking-tight">linux-use</h1>
-    <p class="text-slate-400 mt-4 text-lg max-w-3xl leading-relaxed">
-      Agent-first, CLI-first GUI control for Linux desktops — the Linux answer to
-      <a href="https://github.com/Jeomon/Windows-Use" class="text-slate-300 underline decoration-white/20 hover:decoration-blue-400">Windows-Use</a>.
-      It reads the AT-SPI2 accessibility tree and acts on it, so an agent drives real
-      applications without screenshots or pixel coordinates.
+  </div>
+</nav>
+
+<div class="max-w-5xl mx-auto px-6">
+
+  <!-- hero -->
+  <header class="py-16 sm:py-20 border-b border-[#1f2937]">
+    <img src="assets/icon.png" alt="linux-use icon" class="w-20 h-20 rounded-2xl mb-8">
+    <div class="flex items-center gap-2 mb-6 flex-wrap">
+      <span class="tagchip !text-[#86efac] !border-[#22c55e]/25">v0.7.1</span>
+      <span class="tagchip">229 KB static binary</span>
+      <span class="tagchip">zero deps</span>
+      <span class="tagchip">MIT</span>
+    </div>
+    <h1 class="text-5xl sm:text-6xl font-extrabold text-white tracking-tight leading-[1.05]">
+      Drive any Linux GUI<br>like it's an <em class="not-italic text-[#22c55e]">API</em>.
+    </h1>
+    <p class="text-gray-400 mt-6 text-lg max-w-2xl leading-relaxed">
+      Agent-first GUI control: reads the AT-SPI2 accessibility tree, acts on widgets
+      by ref — no screenshots, no pixel coordinates, no LLM inside. The Linux answer to
+      <a href="https://github.com/Jeomon/Windows-Use" class="text-[#86efac] hover:underline">Windows-Use</a>,
+      built in <a href="https://github.com/javimosch/machin" class="text-[#86efac] hover:underline">machin (MFL)</a>.
     </p>
-    <p class="text-slate-500 mt-4 max-w-3xl leading-relaxed">
-      It ships <strong class="text-slate-300">zero LLM code</strong>. Windows-Use is a Python library with the model
-      inside it; linux-use inverts that — it is a pure sensor/actuator binary, and your agent is the loop.
-    </p>
-    <nav class="mt-8 flex flex-wrap gap-3">
-      <a href="https://github.com/javimosch/linux-use" class="inline-block px-5 py-2.5 rounded-lg bg-white text-black font-medium text-sm hover:bg-slate-200 transition-all">GitHub</a>
-      <a href="https://github.com/javimosch/linux-use/releases/latest" class="inline-block px-5 py-2.5 rounded-lg border border-white/15 text-slate-300 font-medium text-sm hover:border-blue-500 hover:text-blue-400 transition-all">Download binary</a>
-      <a href="changelog.html" class="inline-block px-5 py-2.5 rounded-lg border border-white/15 text-slate-300 font-medium text-sm hover:border-blue-500 hover:text-blue-400 transition-all">Changelog</a>
+    <nav class="mt-9 flex flex-wrap gap-3">
+      <a href="https://github.com/javimosch/linux-use" class="px-5 py-2.5 rounded-lg bg-white text-black font-semibold text-sm hover:bg-slate-200 transition-all">GitHub</a>
+      <a href="https://github.com/javimosch/linux-use/releases/latest" class="px-5 py-2.5 rounded-lg border border-[#1f2937] text-gray-300 font-medium text-sm hover:border-[#22c55e]/50 hover:text-[#86efac] transition-all">Download binary</a>
+      <a href="changelog.html" class="px-5 py-2.5 rounded-lg border border-[#1f2937] text-gray-300 font-medium text-sm hover:border-[#22c55e]/50 hover:text-[#86efac] transition-all">Changelog</a>
     </nav>
   </header>
 
-  <section class="mb-14">
-    <h2 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-4">The loop</h2>
-    <pre class="card rounded-xl p-5 text-sm text-slate-300 overflow-x-auto leading-relaxed"><span class="text-slate-600"># what is running and exposes accessibility</span>
+  <!-- stat band -->
+  <section class="py-12 border-b border-[#1f2937]">
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      <div class="card rounded-xl p-5">
+        <div class="text-3xl font-extrabold text-[#22c55e]">~60 ms</div>
+        <div class="text-xs text-gray-500 mt-1 leading-relaxed">whole-page DOM read via CDP fast path</div>
+      </div>
+      <div class="card rounded-xl p-5">
+        <div class="text-3xl font-extrabold text-[#22c55e]">~70 ms</div>
+        <div class="text-xs text-gray-500 mt-1 leading-relaxed">DOM click through a self-addressed cdp ref</div>
+      </div>
+      <div class="card rounded-xl p-5">
+        <div class="text-3xl font-extrabold text-[#22c55e]">229 KB</div>
+        <div class="text-xs text-gray-500 mt-1 leading-relaxed">single static binary, zero runtime deps</div>
+      </div>
+      <div class="card rounded-xl p-5">
+        <div class="text-3xl font-extrabold text-[#22c55e]">live</div>
+        <div class="text-xs text-gray-500 mt-1 leading-relaxed">drives your signed-in browser session — headless tools can't</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- the loop -->
+  <section class="py-14 border-b border-[#1f2937]">
+    <div class="text-xs font-bold tracking-[0.2em] uppercase text-[#86efac] mb-4">The loop</div>
+    <pre class="card rounded-xl p-5 text-sm text-slate-300 overflow-x-auto leading-relaxed"><span class="text-gray-600"># what is running and exposes accessibility</span>
 $ linux-use apps
 
-<span class="text-slate-600"># interactive elements, each with a ref</span>
+<span class="text-gray-600"># interactive elements, each with a ref</span>
 $ linux-use state --app gnome-calculator
 {"count":28,"walk_ms":48,"method":"walk","elements":[
   {"ref":"gnome-calculator:/0/1/0/1/0/0/1/0/22#18124260",
    "role":"push button","name":"7","cx":114,"cy":376,"action":"click"}, ...]}
 
-<span class="text-slate-600"># act on the widget itself — no pointer, no focus, works occluded</span>
+<span class="text-gray-600"># act on the widget itself — no pointer, no focus, works occluded</span>
 $ linux-use act 'gnome-calculator:/0/1/0/1/0/0/1/0/22#18124260'
 
-<span class="text-slate-600"># wait for the UI to change instead of polling it</span>
+<span class="text-gray-600"># whole page DOM in one ~60ms query (debug-port browser)</span>
+$ linux-use state --app "Microsoft Edge#pid123" --via cdp
+
+<span class="text-gray-600"># wait for the UI to change instead of polling it</span>
 $ linux-use watch --app gnome-calculator --role editbar --duration 5000</pre>
   </section>
 
-  <section class="mb-14">
-    <h2 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-4">What makes it different</h2>
+  <!-- what makes it different -->
+  <section class="py-14 border-b border-[#1f2937]">
+    <div class="text-xs font-bold tracking-[0.2em] uppercase text-[#86efac] mb-6">What makes it different</div>
     <div class="grid sm:grid-cols-2 gap-4">
       <div class="card rounded-xl p-5">
         <h3 class="font-semibold text-white mb-1.5">Acts on widgets, not pixels</h3>
-        <p class="text-slate-400 text-sm leading-relaxed">Invokes a widget's own accessible action — no focus stealing, no pointer movement, and it works while the window is fully hidden behind another one.</p>
+        <p class="text-gray-400 text-sm leading-relaxed">Invokes a widget's own accessible action — no focus stealing, no pointer movement, works while the window is fully hidden behind another one.</p>
+      </div>
+      <div class="card rounded-xl p-5">
+        <h3 class="font-semibold text-white mb-1.5">60ms DOM eye</h3>
+        <p class="text-gray-400 text-sm leading-relaxed"><code class="text-[#86efac]">state --via cdp</code> skips the AX tree entirely — one DOM query, xpath refs, real DOM <code class="text-[#86efac]">click()</code>. Dedicated-profile browsers only; the live profile structurally can't expose a debug port.</p>
+      </div>
+      <div class="card rounded-xl p-5">
+        <h3 class="font-semibold text-white mb-1.5">Below the fold, covered</h3>
+        <p class="text-gray-400 text-sm leading-relaxed"><code class="text-[#86efac]">state --expand</code> and <code class="text-[#86efac]">find --expand</code> drive the container's own scroll actions and merge each pass — all 300 rows of a long table in ~6s, on the browser you already have open.</p>
       </div>
       <div class="card rounded-xl p-5">
         <h3 class="font-semibold text-white mb-1.5">Wrong answers are refused</h3>
-        <p class="text-slate-400 text-sm leading-relaxed">Refs carry a fingerprint. A stale one exits 83 with a fix suggestion; an element whose identity can't be proven is reported unusable rather than guessed.</p>
+        <p class="text-gray-400 text-sm leading-relaxed">Refs carry a fingerprint. A stale one exits 83 with a fix suggestion; an element whose identity can't be proven is reported unusable rather than guessed.</p>
       </div>
       <div class="card rounded-xl p-5">
         <h3 class="font-semibold text-white mb-1.5">Events, not polling</h3>
-        <p class="text-slate-400 text-sm leading-relaxed">Real AT-SPI callbacks streamed as NDJSON, filterable by app, role and event type — with exact stop conditions so an agent can block on a change.</p>
+        <p class="text-gray-400 text-sm leading-relaxed">Real AT-SPI callbacks streamed as NDJSON, filterable by app, role and event type — with exact stop conditions so an agent can block on a change.</p>
       </div>
       <div class="card rounded-xl p-5">
         <h3 class="font-semibold text-white mb-1.5">Incomplete answers are loud</h3>
-        <p class="text-slate-400 text-sm leading-relaxed">A truncated or depth-limited read says so, in the JSON and on stderr — because "0 elements" silently meaning "I didn't look" is how agents get misled.</p>
+        <p class="text-gray-400 text-sm leading-relaxed">A truncated or depth-limited read says so, in the JSON and on stderr — because "0 elements" silently meaning "I didn't look" is how agents get misled.</p>
       </div>
     </div>
   </section>
 
-  <section class="mb-14">
-    <h2 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-4">What works, and what is untested</h2>
+  <!-- benchmark -->
+  <section class="py-14 border-b border-[#1f2937]">
+    <div class="text-xs font-bold tracking-[0.2em] uppercase text-[#86efac] mb-6">vs a purpose-built browser tool</div>
     <div class="card rounded-xl p-6">
+      <p class="text-gray-400 text-sm leading-relaxed mb-5">
+        Measured against <a href="https://github.com/nhrbuilds/flashbrowse" class="text-[#86efac] hover:underline">flashbrowse</a> (Rust, CDP, headless Chrome — release build, same machine, sequential):
+      </p>
       <table class="w-full text-sm">
-        <tbody class="text-slate-400">
-          <tr><td class="py-1.5 pr-4 text-slate-300">GTK 3/4 apps</td><td class="text-emerald-400">verified</td><td class="text-slate-500">6 apps: read, act, type, watch</td></tr>
-          <tr><td class="py-1.5 pr-4 text-slate-300">Qt 5 apps</td><td class="text-emerald-400">verified</td><td class="text-slate-500">menus actuated via ShowMenu</td></tr>
-          <tr><td class="py-1.5 pr-4 text-slate-300">Chromium/Edge web content</td><td class="text-amber-400">needs a flag</td><td class="text-slate-500"><code>--force-renderer-accessibility</code></td></tr>
-          <tr><td class="py-1.5 pr-4 text-slate-300">Electron, Java, Flutter</td><td class="text-slate-500">not tested</td><td class="text-slate-500">—</td></tr>
-          <tr><td class="py-1.5 pr-4 text-slate-300">Wayland</td><td class="text-red-400">click/key broken</td><td class="text-slate-500">AT-SPI paths still work</td></tr>
+        <thead>
+          <tr class="text-left text-xs uppercase tracking-wider text-gray-500 border-b border-[#1f2937]">
+            <th class="pb-2 pr-4 font-medium">page</th>
+            <th class="pb-2 pr-4 font-medium">linux-use <code>--via cdp</code></th>
+            <th class="pb-2 font-medium">flashbrowse <code>open</code></th>
+          </tr>
+        </thead>
+        <tbody class="text-gray-400">
+          <tr class="border-b border-[#1f2937]/60"><td class="py-2.5 pr-4 text-gray-300">300-row table</td><td class="text-[#86efac] font-medium">0.40 s — 900 elements</td><td>1.2–1.5 s incl. Chrome spawn</td></tr>
+          <tr class="border-b border-[#1f2937]/60"><td class="py-2.5 pr-4 text-gray-300">MDN HTML reference</td><td class="text-[#86efac] font-medium">0.37 s — 422 elements</td><td>2.7–4.7 s — 150 actions</td></tr>
+          <tr class="border-b border-[#1f2937]/60"><td class="py-2.5 pr-4 text-gray-300">Wikipedia population list</td><td class="text-[#86efac] font-medium">0.48 s — 1,767 elements</td><td>5.1–9.4 s — 1,954 actions</td></tr>
+          <tr><td class="py-2.5 pr-4 text-gray-300">warm <code>act</code></td><td class="text-[#86efac] font-medium">~70 ms</td><td>~850 ms — rebuilds AX map per call</td></tr>
         </tbody>
       </table>
-      <p class="text-slate-500 text-sm mt-4 leading-relaxed">
+      <p class="text-gray-500 text-sm mt-5 leading-relaxed">
+        Not a knockout: flashbrowse returns a semantic tree (markdown dumps, sessions, MCP, stealth);
+        the CDP path returns interactive elements only and needs a browser launched with a debug port.
+        The win is that a GUI tool now does web perception faster than the thing built for it.
+      </p>
+    </div>
+  </section>
+
+  <!-- verified matrix -->
+  <section class="py-14 border-b border-[#1f2937]">
+    <div class="text-xs font-bold tracking-[0.2em] uppercase text-[#86efac] mb-6">What works, and what is untested</div>
+    <div class="card rounded-xl p-6">
+      <table class="w-full text-sm">
+        <tbody class="text-gray-400">
+          <tr><td class="py-1.5 pr-4 text-gray-300">GTK 3/4 apps</td><td class="text-[#22c55e] font-medium">verified</td><td class="text-gray-500">6 apps: read, act, type, watch</td></tr>
+          <tr><td class="py-1.5 pr-4 text-gray-300">Qt 5 apps</td><td class="text-[#22c55e] font-medium">verified</td><td class="text-gray-500">menus actuated via ShowMenu</td></tr>
+          <tr><td class="py-1.5 pr-4 text-gray-300">Chromium/Edge web content</td><td class="text-amber-400 font-medium">needs a flag</td><td class="text-gray-500"><code>--force-renderer-accessibility</code>; <code>--via cdp</code> needs a debug port</td></tr>
+          <tr><td class="py-1.5 pr-4 text-gray-300">Electron, Java, Flutter</td><td class="text-gray-500">not tested</td><td class="text-gray-500">—</td></tr>
+          <tr><td class="py-1.5 pr-4 text-gray-300">Wayland</td><td class="text-red-400 font-medium">click/key broken</td><td class="text-gray-500">AT-SPI paths still work</td></tr>
+        </tbody>
+      </table>
+      <p class="text-gray-500 text-sm mt-4 leading-relaxed">
         Tested on exactly one configuration — Ubuntu 22.04.3, GNOME 42.9, X11, x86-64 — by hand.
-        <strong class="text-slate-400">There is no automated test suite yet</strong>: the numbers here are real
+        <strong class="text-gray-400">There is no automated test suite yet</strong>: the numbers here are real
         measurements, but nothing re-checks them on commit. Treat it as a v0.x tool.
       </p>
     </div>
   </section>
 
-  <section class="mb-14">
-    <h2 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-4">Install</h2>
+  <!-- install -->
+  <section class="py-14 border-b border-[#1f2937]">
+    <div class="text-xs font-bold tracking-[0.2em] uppercase text-[#86efac] mb-4">Install</div>
     <pre class="card rounded-xl p-5 text-sm text-slate-300 overflow-x-auto leading-relaxed">sudo apt install libatspi2.0-dev libxtst-dev libx11-dev libglib2.0-dev
 gsettings set org.gnome.desktop.interface toolkit-accessibility true
-./build.sh          <span class="text-slate-600"># or grab the binary from Releases</span>
-linux-use doctor    <span class="text-slate-600"># tells you what's missing</span></pre>
-    <p class="text-slate-500 text-sm mt-3">X11 today. On Wayland the accessibility paths still work; synthetic input does not.</p>
+./build.sh          <span class="text-gray-600"># or grab the binary from Releases</span>
+linux-use doctor    <span class="text-gray-600"># tells you what's missing</span></pre>
+    <p class="text-gray-500 text-sm mt-3">X11 today. On Wayland the accessibility paths still work; synthetic input does not.</p>
   </section>
 
-  <section class="mb-14">
-    <h2 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-4">Built with machin</h2>
+  <!-- machin -->
+  <section class="py-14 border-b border-[#1f2937]">
+    <div class="text-xs font-bold tracking-[0.2em] uppercase text-[#86efac] mb-6">Built with machin</div>
     <div class="card rounded-xl p-6">
-      <p class="text-slate-400 leading-relaxed">
-        linux-use is written in <a href="https://github.com/javimosch/machin" class="text-blue-400 hover:text-blue-300 font-medium">machin (MFL)</a> —
+      <p class="text-gray-400 leading-relaxed">
+        linux-use is written in <a href="https://github.com/javimosch/machin" class="text-[#86efac] hover:underline font-medium">machin (MFL)</a> —
         the Machine-First Language: terse enough for an agent to write, compiled through C to a single tiny
         native binary with HTTP, SQLite and crypto built in. No runtime, no dependencies.
       </p>
-      <p class="text-slate-400 leading-relaxed mt-3">
-        The whole tool is one source file plus a small C shim for the AT-SPI FFI boundary. See
-        <a href="https://github.com/javimosch/awesome-machin" class="text-blue-400 hover:text-blue-300 font-medium">awesome-machin</a>
+      <p class="text-gray-400 leading-relaxed mt-3">
+        The whole tool is one source file plus a small C shim for the AT-SPI FFI boundary and a minimal
+        localhost WebSocket client for CDP. See
+        <a href="https://github.com/javimosch/awesome-machin" class="text-[#86efac] hover:underline font-medium">awesome-machin</a>
         for other things built with it.
       </p>
-      <p class="text-slate-400 leading-relaxed mt-3">
+      <p class="text-gray-400 leading-relaxed mt-3">
         It follows the agent-first CLI conventions at
-        <a href="https://cli-specs.intrane.fr/" class="text-blue-400 hover:text-blue-300 font-medium">cli-specs.intrane.fr</a>:
+        <a href="https://cli-specs.intrane.fr/" class="text-[#86efac] hover:underline font-medium">cli-specs.intrane.fr</a>:
         JSON on stdout, context on stderr, semantic exit codes, typed errors with suggestions, an embedded
-        <code class="text-slate-300">guide</code>, and a daemon lifecycle.
+        <code class="text-gray-300">guide</code>, and a daemon lifecycle.
       </p>
     </div>
   </section>
 
-  <footer class="pt-8 border-t border-white/10 text-sm text-slate-500">
+  <footer class="py-10 text-sm text-gray-500">
     <p>
       MIT licensed. Built by
-      <a href="https://www.linkedin.com/in/arancibiajav/" class="text-slate-300 hover:text-blue-400">Javier Arancibia</a>
-      · <a href="https://intrane.fr" class="text-slate-300 hover:text-blue-400">intrane.fr</a>
-      · <a href="https://github.com/javimosch/linux-use" class="text-slate-300 hover:text-blue-400">source</a>
+      <a href="https://www.linkedin.com/in/arancibiajav/" class="text-gray-400 hover:text-[#86efac]">Javier Arancibia</a>
+      · <a href="https://intrane.fr" class="text-gray-400 hover:text-[#86efac]">intrane.fr</a>
+      · <a href="https://github.com/javimosch/linux-use" class="text-gray-400 hover:text-[#86efac]">source</a>
     </p>
   </footer>
 
