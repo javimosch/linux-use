@@ -1126,6 +1126,220 @@ func scrollbackidx(node) (idx) {
 	g_object_unref(ai)
 }
 
+// expandsweep scrolls the app's scrollable container forward — its own
+// scrollForward/scrollDown accessible action when it exposes one (a full
+// viewport per call, works occluded, no pointer), else XTEST wheel clicks at
+// the window center — running a perception pass after each scroll and
+// merging new rows by ref-path key into the caller's `rows`. Stops after
+// wantExpandMax scrolls or two consecutive settled passes with nothing new,
+// then scrolls back. Seeds seen/merged from the global rows+rowkeys of the
+// pass already taken; returns (merged rows, scrolls, passes, method, ms).
+func expandsweep(appname, app, maxdepth, maxnodes) (merged, scrolled, passes, method, ms) {
+	method = "wheel"
+	snode, saction := findscrollnode(app)
+	if snode != 0 {
+		method = "action"
+	}
+	cx := 0
+	cy := 0
+	win := atspi_accessible_get_child_at_index(app, 0, 0)
+	if win != 0 {
+		wx, wy, ww, wh := extents(win)
+		g_object_unref(win)
+		cx = wx + ww / 2
+		cy = wy + wh / 2
+	}
+	seen := "|" + join(rowkeys, "|") + "|"
+	merged = []string{}
+	i := 0
+	while i < len(rows) {
+		merged = append(merged, rows[i])
+		i = i + 1
+	}
+	// Passes must see every realized node, not only find's text matches —
+	// otherwise "nothing new" fires while the page is still scrolling and the
+	// sweep idles out before reaching below-fold matches. Callers re-filter
+	// merged rows afterwards; restored before returning.
+	savedWantText := wantText
+	wantText = ""
+	canScroll := snode != 0 || (cx > 0 && cy > 0)
+	if !canScroll {
+		write(2, "warning: --expand found no scroll action and no window geometry; returning the first pass\n")
+	}
+	idle := 0
+	keepGoing := canScroll
+	t0 := now_ms()
+	while keepGoing {
+		scrolledOk := false
+		if snode != 0 {
+			sai := atspi_accessible_get_action_iface(snode)
+			if sai != 0 {
+				scrolledOk = atspi_action_do_action(sai, saction, 0)
+				g_object_unref(sai)
+			}
+		} else {
+			scrolledOk = clickxy(cx, cy, 5)
+		}
+		if !scrolledOk {
+			write(2, "warning: --expand could not scroll; returning what was seen\n")
+			keepGoing = false
+		} else {
+			scrolled = scrolled + 1
+			// Adaptive settle: a short pre-probe delay lets the new viewport
+			// finish realizing (probing at t=0 snapshots a half-materialized
+			// window and permanently skips the lagging rows), then re-probe
+			// once after the full wait only when nothing new surfaced — that
+			// is what makes idle passes distinguishable from slow settles.
+			sleep(wantExpandWait / 2)
+			_, _ = statepass(appname, app, maxdepth, maxnodes)
+			added := 0
+			i = 0
+			while i < len(rowkeys) {
+				k := rowkeys[i]
+				if !contains(seen, "|"+k+"|") {
+					seen = seen + k + "|"
+					merged = append(merged, rows[i])
+					added = added + 1
+				}
+				i = i + 1
+			}
+			if added == 0 {
+				sleep(wantExpandWait)
+				_, _ = statepass(appname, app, maxdepth, maxnodes)
+				i = 0
+				while i < len(rowkeys) {
+					k := rowkeys[i]
+					if !contains(seen, "|"+k+"|") {
+						seen = seen + k + "|"
+						merged = append(merged, rows[i])
+						added = added + 1
+					}
+					i = i + 1
+				}
+			}
+			if added == 0 {
+				idle = idle + 1
+			} else {
+				idle = 0
+			}
+			passes = passes + 1
+			if passes >= wantExpandMax || idle >= 2 {
+				keepGoing = false
+			}
+		}
+	}
+	ms = now_ms() - t0
+	wantText = savedWantText
+	// Put the scroll position back roughly where it was.
+	i = 0
+	if snode != 0 {
+		bidx := scrollbackidx(snode)
+		if bidx >= 0 {
+			sai := atspi_accessible_get_action_iface(snode)
+			if sai != 0 {
+				while i < scrolled {
+					atspi_action_do_action(sai, bidx, 0)
+					i = i + 1
+				}
+				g_object_unref(sai)
+			}
+		}
+		g_object_unref(snode)
+	} else {
+		while i < scrolled {
+			clickxy(cx, cy, 4)
+			i = i + 1
+		}
+	}
+}
+
+// recordmetric appends one JSON line to ~/.cache/linux-use/metrics.jsonl —
+// the trail that keeps speed claims honest. Fire-and-forget via the shell: a
+// broken metrics file must never break a command.
+func recordmetric(op, app, ms, count, method, passes) {
+	safe := replace(replace(cleanline(app), "'", ""), "\"", "")
+	line := "{\"ts\":" + str(now_ms()) + ",\"op\":\"" + op + "\",\"app\":\"" + safe + "\",\"ms\":" + str(ms) + ",\"count\":" + str(count) + ",\"method\":\"" + method + "\",\"passes\":" + str(passes) + "}"
+	system("mkdir -p \"$HOME/.cache/linux-use\" && printf '%s\\n' '" + line + "' >> \"$HOME/.cache/linux-use/metrics.jsonl\"")
+}
+
+func jfieldstr(s, key) (v) {
+	v = ""
+	parts := split(s, "\""+key+"\":\"")
+	if len(parts) > 1 {
+		v = split(parts[1], "\"")[0]
+	}
+}
+
+func jfieldnum(s, key) (v) {
+	v = 0
+	parts := split(s, "\""+key+"\":")
+	if len(parts) > 1 {
+		rest := split(parts[1], ",")[0]
+		rest = split(rest, "}")[0]
+		v = parse_int(rest)
+	}
+}
+
+// cmd_stats aggregates the metrics trail: per op, calls and min/avg/max ms.
+func cmd_stats(last) (out, code) {
+	code = EX_OK
+	out = ""
+	if last <= 0 {
+		last = 200
+	}
+	_, content, _ := exec("tail -n " + str(last) + " \"$HOME/.cache/linux-use/metrics.jsonl\" 2>/dev/null")
+	lines := split(content, "\n")
+	ops := "|"
+	n := 0
+	i := 0
+	while i < len(lines) {
+		ln := lines[i]
+		if len(ln) > 0 {
+			n = n + 1
+			op := jfieldstr(ln, "op")
+			if len(op) > 0 && !contains(ops, "|"+op+"|") {
+				ops = ops + op + "|"
+			}
+		}
+		i = i + 1
+	}
+	entries := []string{}
+	names := split(ops, "|")
+	i = 0
+	while i < len(names) {
+		op := names[i]
+		i = i + 1
+		if len(op) > 0 {
+			calls := 0
+			sum := 0
+			mn := 0
+			mx := 0
+			elems := 0
+			j := 0
+			while j < len(lines) {
+				ln := lines[j]
+				j = j + 1
+				if len(ln) > 0 && jfieldstr(ln, "op") == op {
+					m := jfieldnum(ln, "ms")
+					calls = calls + 1
+					sum = sum + m
+					if calls == 1 || m < mn {
+						mn = m
+					}
+					if m > mx {
+						mx = m
+					}
+					elems = elems + jfieldnum(ln, "count")
+				}
+			}
+			if calls > 0 {
+				entries = append(entries, "{"+jkv("op", jstr(op))+","+jkv("calls", str(calls))+","+jkv("min_ms", str(mn))+","+jkv("avg_ms", str(sum / calls))+","+jkv("max_ms", str(mx))+","+jkv("elements", str(elems))+"}")
+			}
+		}
+	}
+	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("window", str(n)) + "," + jkv("file", jstr("~/.cache/linux-use/metrics.jsonl")) + "," + jkv("ops", jarr(entries)) + "}"
+}
+
 func cmd_state(appname, maxdepth, maxnodes) (out, code) {
 	code = EX_OK
 	out = ""
@@ -1148,106 +1362,17 @@ func cmd_state(appname, maxdepth, maxnodes) (out, code) {
 	method, unknown := statepass(appname, app, maxdepth, maxnodes)
 	geomCount := geomrefs
 	ms := now_ms() - t0
-	merged := []string{}
-	mi := 0
-	while mi < len(rows) {
-		merged = append(merged, rows[mi])
-		mi = mi + 1
-	}
+	merged := rows
 	passes := 0
 	scrolled := 0
 	expanded := false
 	expandMs := 0
 	if wantExpand {
-		// Chromium materializes AX nodes for the viewport plus a margin, so a
-		// single pass sees only the on-screen slice. Prefer the scrollable
-		// container's own scrollForward/scrollDown action (a full viewport
-		// per call, works occluded, no pointer); fall back to XTEST wheel
-		// clicks at the window center when no scroll action exists.
-		expandMethod := "wheel"
-		snode, saction := findscrollnode(app)
-		if snode != 0 {
-			expandMethod = "action"
-		}
-		cx := 0
-		cy := 0
-		win := atspi_accessible_get_child_at_index(app, 0, 0)
-		if win != 0 {
-			wx, wy, ww, wh := extents(win)
-			g_object_unref(win)
-			cx = wx + ww / 2
-			cy = wy + wh / 2
-		}
-		seen := "|" + join(rowkeys, "|") + "|"
-		canScroll := snode != 0 || (cx > 0 && cy > 0)
-		if !canScroll {
-			write(2, "warning: --expand found no scroll action and no window geometry; returning the first pass\n")
-		}
-		idle := 0
-		keepGoing := canScroll
-		et0 := now_ms()
-		while keepGoing {
-			scrolledOk := false
-			if snode != 0 {
-				sai := atspi_accessible_get_action_iface(snode)
-				if sai != 0 {
-					scrolledOk = atspi_action_do_action(sai, saction, 0)
-					g_object_unref(sai)
-				}
-			} else {
-				scrolledOk = clickxy(cx, cy, 5)
-			}
-			if !scrolledOk {
-				write(2, "warning: --expand could not scroll; returning what was seen\n")
-				keepGoing = false
-			} else {
-				scrolled = scrolled + 1
-				sleep(wantExpandWait)
-				_, _ = statepass(appname, app, maxdepth, maxnodes)
-				added := 0
-				i := 0
-				while i < len(rowkeys) {
-					k := rowkeys[i]
-					if !contains(seen, "|"+k+"|") {
-						seen = seen + k + "|"
-						merged = append(merged, rows[i])
-						added = added + 1
-					}
-					i = i + 1
-				}
-				if added == 0 {
-					idle = idle + 1
-				} else {
-					idle = 0
-				}
-				passes = passes + 1
-				if passes >= wantExpandMax || idle >= 2 {
-					keepGoing = false
-				}
-			}
-		}
-		expandMs = now_ms() - et0
-		// Put the scroll position back roughly where it was.
-		i := 0
-		if snode != 0 {
-			bidx := scrollbackidx(snode)
-			if bidx >= 0 {
-				sai := atspi_accessible_get_action_iface(snode)
-				if sai != 0 {
-					while i < scrolled {
-						atspi_action_do_action(sai, bidx, 0)
-						i = i + 1
-					}
-					g_object_unref(sai)
-				}
-			}
-			g_object_unref(snode)
-		} else {
-			while i < scrolled {
-				clickxy(cx, cy, 4)
-				i = i + 1
-			}
-		}
+		mrows, s, p, expandMethod, ems := expandsweep(appname, app, maxdepth, maxnodes)
+		merged = mrows
+		scrolled = s
+		passes = p
+		expandMs = ems
 		expanded = scrolled > 0
 		if expanded {
 			write(2, "expand: "+str(scrolled)+" scrolls via "+expandMethod+", "+str(len(merged))+" elements merged\n")
@@ -1279,6 +1404,7 @@ func cmd_state(appname, maxdepth, maxnodes) (out, code) {
 		f = append(f, jkv("expand_passes", str(passes)))
 		out = "{" + join(f, ",") + "}"
 	}
+	recordmetric("state", appname, ms+expandMs, len(rows), method, passes)
 	if len(unknown) > 0 {
 		write(2, "warning: unknown role '" + unknown + "' — it matched nothing; check: linux-use roles\n")
 	}
@@ -1290,14 +1416,37 @@ func cmd_state(appname, maxdepth, maxnodes) (out, code) {
 	}
 }
 
+// rowname extracts the element name from an emitted row — "name" field in
+// JSON, third tab-separated field in lines format.
+func rowname(r) (n) {
+	if wantFormat == "lines" {
+		parts := split(r, "\t")
+		if len(parts) > 2 {
+			n = parts[2]
+		}
+	} else {
+		n = jfieldstr(r, "name")
+	}
+}
+
 func cmd_find(query, appfilter, maxdepth, maxnodes) (out, code) {
 	code = EX_OK
+	out = ""
+	if wantExpand && len(appfilter) == 0 {
+		code = EX_USAGE
+		out = errjson("bad_flags", "find --expand requires --app — sweeping every desktop application would scroll all of them", true, []string{"example: linux-use find \"Submit\" --app \"Microsoft Edge\" --expand"})
+		return
+	}
 	wantText = query
 	findMethod = "collection"
 	all := []string{}
 	visited = 0
 	deepest = 0
 	depthCut = false
+	expanded := false
+	passes := 0
+	scrolled := 0
+	expandMs := 0
 	t0 := now_ms()
 	n := atspi_accessible_get_child_count(desktop, 0)
 	i := 0
@@ -1326,6 +1475,27 @@ func cmd_find(query, appfilter, maxdepth, maxnodes) (out, code) {
 					findMethod = "walk"
 					walk(nm, a, "", 0, maxdepth)
 				}
+				if wantExpand {
+					mrows, s, p, em, ems := expandsweep(nm, a, maxdepth, maxnodes)
+					// expandsweep sees all nodes (correct idle detection); the
+					// answer keeps only name matches, same as a plain find.
+					rows = []string{}
+					qlow := to_lower(query)
+					mi := 0
+					while mi < len(mrows) {
+						if contains(to_lower(rowname(mrows[mi])), qlow) {
+							rows = append(rows, mrows[mi])
+						}
+						mi = mi + 1
+					}
+					scrolled = scrolled + s
+					passes = passes + p
+					expandMs = expandMs + ems
+					if s > 0 {
+						expanded = true
+						findMethod = findMethod + "+" + em
+					}
+				}
 				j := 0
 				while j < len(rows) {
 					all = append(all, rows[j])
@@ -1338,7 +1508,7 @@ func cmd_find(query, appfilter, maxdepth, maxnodes) (out, code) {
 	}
 	ms := now_ms() - t0
 	if wantFormat == "lines" {
-		out = "# linux-use find query=" + cleanline(query) + " count=" + str(len(all)) + " search_ms=" + str(ms) + " method=" + findMethod + " depth_limited=" + jbool(depthCut) + "\n" + join(all, "\n")
+		out = "# linux-use find query=" + cleanline(query) + " count=" + str(len(all)) + " search_ms=" + str(ms) + " method=" + findMethod + " depth_limited=" + jbool(depthCut) + " expanded=" + jbool(expanded) + " expand_passes=" + str(passes) + "\n" + join(all, "\n")
 	} else {
 		f := []string{}
 		f = append(f, jkv("schema", jstr(SCHEMA)))
@@ -1351,8 +1521,12 @@ func cmd_find(query, appfilter, maxdepth, maxnodes) (out, code) {
 		f = append(f, jkv("deepest", str(deepest)))
 		f = append(f, jkv("depth_limited", jbool(depthCut)))
 		f = append(f, jkv("method", jstr(findMethod)))
+		f = append(f, jkv("expanded", jbool(expanded)))
+		f = append(f, jkv("expand_passes", str(passes)))
+		f = append(f, jkv("expand_ms", str(expandMs)))
 		out = "{" + join(f, ",") + "}"
 	}
+	recordmetric("find", appfilter+" "+query, ms+expandMs, len(all), findMethod, passes)
 	if depthCut && findMethod == "walk" {
 		write(2, "warning: subtrees were cut at --depth " + str(maxdepth) + "; raise --depth if the target is missing\n")
 	}
@@ -2466,7 +2640,7 @@ func guide_json() (r) {
 	g = append(g, jstr("For a label whose NAME IS ITS TEXT, the fingerprint changes whenever the text changes, so a ref captured from an event will report ref_stale on the next read. That is the mechanism working: the staleness IS the signal that the content changed. Re-run state, or drop the #fingerprint to address the path alone."))
 	g = append(g, jstr("OBSERVER EFFECT: reading the tree (state/find) can itself make toolkits emit accessibility events. If you run 'watch' while also polling 'state', expect self-induced noise — especially object:state-changed:*, which is why it is not in the default event set."))
 	g = append(g, jstr("Large apps (browsers) have huge trees. Use --role, --depth, or 'find' rather than dumping everything; a truncated walk warns on stderr and sets truncated:true."))
-	g = append(g, jstr("On long web pages, state/find only see the nodes Chromium has realized — roughly the viewport plus a margin (measured: a 300-row table exposed ~55 rows). Widgets below the fold are absent from the tree entirely, so find returns no match for them. 'state --expand' automates the fix: it invokes the scrollable container's scrollForward/scrollDown accessible action when one exists (a full viewport per call, works occluded, no pointer) or XTEST wheel clicks at the window center otherwise, merges each pass by ref path, then scrolls back — envelope fields expanded/expand_passes/expand_ms report what happened; --expand-passes/--expand-wait tune it. Manual equivalent: scroll (click --button 5) then re-run state."))
+	g = append(g, jstr("On long web pages, state/find only see the nodes Chromium has realized — roughly the viewport plus a margin (measured: a 300-row table exposed ~55 rows). Widgets below the fold are absent from the tree entirely, so find returns no match for them. 'state --expand' automates the fix: it invokes the scrollable container's scrollForward/scrollDown accessible action when one exists (a full viewport per call, works occluded, no pointer) or XTEST wheel clicks at the window center otherwise, merges each pass by ref path, then scrolls back — envelope fields expanded/expand_passes/expand_ms report what happened; --expand-passes/--expand-wait tune it. To reach ONE below-fold widget prefer 'find <query> --app X --expand' — same sweep, returns only matches. Manual equivalent: scroll (click --button 5) then re-run state."))
 	g = append(g, jstr("state and find take --format lines: one element per line (ref, role, name, x,y,w,h, action, flags) — roughly half the tokens of the JSON envelope. Metadata moves to a leading # line; errors stay JSON."))
 	g = append(g, jstr("NEVER automate the user's LIVE browser profile with Playwright/CDP: the forced --use-mock-keychain makes the cookie DB undecryptable and Chromium RESETS it (all site sessions wiped, unrecoverable — secure_delete zeroes deleted rows). Same for --user-data-dir=<real profile>. Always use a dedicated profile dir (contrib/a11y-browser) or a throwaway COPY of the profile. Driving the live session via AT-SPI (this tool) is safe; it touches no profile internals. Also note: the Edge process is 'msedge', not 'microsoft-edge' — a pgrep for the latter sees nothing while the browser is running."))
 	c = append(c, jkv("gotchas", jarr(g)))
@@ -2518,7 +2692,8 @@ func helpjson() (r) {
 	cmds = append(cmds, "{"+jkv("name", jstr("apps"))+","+jkv("args", jarr([]string{}))+","+jkv("summary", jstr("list applications with pid, toolkit and window count; flags ambiguous names"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("windows"))+","+jkv("args", jarr([]string{jstr("--app")}))+","+jkv("summary", jstr("list top-level windows with geometry and active state"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("state"))+","+jkv("args", jarr([]string{jstr("--app (required)"), jstr("--depth"), jstr("--role"), jstr("--all"), jstr("--expand"), jstr("--format")}))+","+jkv("summary", jstr("interactive elements of an app, with refs; --expand scrolls to realize below-fold nodes, --format lines is compact"))+"}")
-	cmds = append(cmds, "{"+jkv("name", jstr("find"))+","+jkv("args", jarr([]string{jstr("<query>"), jstr("--app"), jstr("--role"), jstr("--depth"), jstr("--format")}))+","+jkv("summary", jstr("search elements by name substring"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("find"))+","+jkv("args", jarr([]string{jstr("<query>"), jstr("--app"), jstr("--role"), jstr("--depth"), jstr("--expand"), jstr("--format")}))+","+jkv("summary", jstr("search elements by name substring; --expand sweeps below the fold (needs --app)"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("stats"))+","+jkv("args", jarr([]string{jstr("--last N")}))+","+jkv("summary", jstr("aggregate ~/.cache/linux-use/metrics.jsonl — per-op calls and min/avg/max ms"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("act"))+","+jkv("args", jarr([]string{jstr("<ref>"), jstr("--action N")}))+","+jkv("summary", jstr("invoke the element's accessible action (preferred)"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("read"))+","+jkv("args", jarr([]string{jstr("<ref>")}))+","+jkv("summary", jstr("read an element's text, name and description"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("type"))+","+jkv("args", jarr([]string{jstr("<ref>"), jstr("<text>"), jstr("--replace"), jstr("--allow-password")}))+","+jkv("summary", jstr("insert text via the editable-text interface"))+"}")
@@ -2709,9 +2884,10 @@ func run_cmd(argv) (out, code) {
 	fs = flag_bool(fs, "collection", "", "force a server-side collection query")
 	fs = flag_bool(fs, "replace", "", "replace existing text instead of inserting")
 	fs = flag_bool(fs, "allow-password", "", "permit typing into a password field")
-	fs = flag_bool(fs, "expand", "", "state: scroll through the app and merge realized nodes")
+	fs = flag_bool(fs, "expand", "", "state/find: scroll through the app and merge realized nodes")
 	fs = flag_int(fs, "expand-passes", "", "25", "expand: maximum scroll passes")
-	fs = flag_int(fs, "expand-wait", "", "400", "expand: settle ms per scroll pass")
+	fs = flag_int(fs, "expand-wait", "", "400", "expand: extra settle ms when a pass shows nothing new")
+	fs = flag_int(fs, "last", "", "200", "stats: metrics window size")
 	fs = flag_str(fs, "format", "", "json", "output format: json|lines")
 	fs = flag_bool(fs, "human", "", "human-readable output (guide only)")
 	fs = parse_flags(fs, rest)
@@ -2869,6 +3045,10 @@ func run_cmd(argv) (out, code) {
 			return
 		}
 		out, code = cmd_find(pos[0], flag_get(fs, "app"), depth, maxnodes)
+		return
+	}
+	if cmd == "stats" {
+		out, code = cmd_stats(flag_int_val(fs, "last"))
 		return
 	}
 	if cmd == "act" {

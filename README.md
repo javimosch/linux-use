@@ -459,16 +459,17 @@ flashbrowse for the public web, linux-use for the session.
   scroll actions (landed)
 - [x] **payload size** — `--format lines`: ~half the tokens of the JSON
   envelope (landed)
-- [ ] **`find --expand`** — sweep until the match appears instead of dumping
-  everything; most below-the-fold queries never need the full tree
-- [ ] **adaptive settle** — poll for post-scroll tree mutation instead of a
-  fixed `--expand-wait`; should cut the ~6 s sweep toward ~2–3 s
+- [x] **`find --expand`** — sweep below the fold and return only matches
+  (`find "Action 295"` → ref in ~7 s; landed)
+- [x] **adaptive settle** — a short pre-probe delay plus re-probe-on-idle
+  instead of a fixed per-scroll wait (landed)
+- [x] **metrics trail** — `state`/`find` append to
+  `~/.cache/linux-use/metrics.jsonl`; `linux-use stats` aggregates
+  min/avg/max ms per op (landed)
 - [ ] **CDP fast path** (`state --via cdp`) — only for dedicated-profile
   instances launched with `--remote-debugging-port`; matches flashbrowse
   speed on web content while AT-SPI keeps covering chrome/desktop. Never
   against the live profile.
-- [ ] **metrics trail** — flashbrowse-style `stats` (op, ms, node count) so
-  future speed claims stay honest
 
 ## Hard-won machin FFI findings
 
