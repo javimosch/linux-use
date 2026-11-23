@@ -88,6 +88,8 @@ exposing no action.
 apps                          applications with pid, toolkit, window count
 windows [--app X]             top-level windows: geometry, title, active
 state --app X [--pid N] [--role R] [--all] [--depth N]
+      [--expand]              scroll through the app and merge realized nodes
+      [--format lines]        one element per line, ~3x smaller than JSON
 find <query> [--app X]        search elements by name substring
 act <ref> [--action N]        invoke the accessible action (preferred)
 read <ref>                    text, name, description
@@ -169,7 +171,7 @@ serve | daemon start|stop|status
    will clear a low threshold), and reject a near-uniform frame — max
    per-channel spread under ~12 is the cheapest possible check for this whole
    family, and it costs four lines.
-13. **On long web pages, `state`/`find` only see what Chromium has realized.** It materializes AX nodes for roughly the viewport plus a margin — a 300-row table exposed only ~55 rows (568 elements), and `find` returned 0 matches for widgets that exist in the DOM below the fold. To reach them, scroll (`click --x N --y N --button 5`) and re-run `state`; repeat until found. A CDP tool (flashbrowse) reads the complete document tree in one shot with no scrolling — but only on a browser launched with a debugging port on a non-default profile, and very heavy pages (>15k widgets) can stall its tree fetch entirely.
+13. **On long web pages, `state`/`find` only see what Chromium has realized.** It materializes AX nodes for roughly the viewport plus a margin — a 300-row table exposed only ~55 rows (568 elements), and `find` returned 0 matches for widgets that exist in the DOM below the fold. `state --expand` automates the fix: it invokes the scrollable container's own `scrollForward`/`scrollDown` accessible action (a full viewport per call, works occluded, no pointer — falls back to XTEST wheel clicks when no scroll action exists), merges each pass by ref path, then scrolls back. Measured: all 300 rows in 8 scrolls / ~6 s. Tune with `--expand-passes` / `--expand-wait`. Manual equivalent: `click --x N --y N --button 5` then re-run `state`. A CDP tool (flashbrowse) reads the complete document tree in one shot with no scrolling — but only on a browser launched with a debugging port on a non-default profile, and very heavy pages (>15k widgets) can stall its tree fetch entirely.
 14. **Two apps with the same name: AT-SPI is a per-user bus.** When a
    dedicated-profile browser runs on a virtual display alongside the user's
    real browser, both appear in `linux-use apps` with the same name.

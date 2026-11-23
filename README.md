@@ -439,8 +439,10 @@ v1.2.1, built from source):
 
 Neither number is a "linux-use is faster" claim. AT-SPI is fast because
 Chromium only materializes AX nodes near the viewport — `find` cannot locate a
-widget below the fold until you scroll it into view (`click --x N --y N
---button 5`, then re-run `state`). CDP sees the whole document in one shot
+widget below the fold until you scroll it into view — `state --expand`
+automates this (drives the scrollable container's own `scrollForward`
+accessible action, merges each pass by ref path; all 300 rows of the test
+page in 8 scrolls / ~6 s). CDP sees the whole document in one shot
 (flashbrowse's compressed action tree also runs ~7–18x fewer tokens than
 Playwright AX snapshots) but pays full-tree cost, which collapses on very
 heavy pages. The honest split: **a CDP tool is the right answer for websites

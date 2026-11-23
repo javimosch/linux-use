@@ -565,8 +565,9 @@ func interactive_roles() (r) {
 // collect runs a server-side collection query and returns JSON rows. ok=false
 // means the app exposes no Collection interface and the caller must fall back
 // to walking. Unmatched roles are reported so a typo is not silent.
-func collect(appname, app, rolefilter, maxnodes) (out, n, ok, unknown, unpathed) {
+func collect(appname, app, rolefilter, maxnodes) (out, keys, n, ok, unknown, unpathed) {
 	out = []string{}
+	keys = []string{}
 	n = 0
 	ok = false
 	unknown = ""
@@ -634,15 +635,21 @@ func collect(appname, app, rolefilter, maxnodes) (out, n, ok, unknown, unpathed)
 									rid := lu_role_from_name(role)
 									if rid >= 0 && wd > 0 && ht > 0 {
 										geomrefs = geomrefs + 1
-										out = append(out, nodegeomjson(appname, node, rid, x, y, wd, ht, role, name))
+										gjs, gln, gk := nodegeomrow(appname, node, rid, x, y, wd, ht, role, name)
+										out = append(out, pickfmt(gjs, gln))
+										keys = append(keys, gk)
 										n = n + 1
 									} else {
 										unpathed = unpathed + 1
-										out = append(out, nodejson(appname, node, path, role, name, false))
+										ujs, uln, uk := noderow(appname, node, path, role, name, false)
+										out = append(out, pickfmt(ujs, uln))
+										keys = append(keys, uk)
 										n = n + 1
 									}
 								} else {
-									out = append(out, nodejson(appname, node, path, role, name, true))
+									ejs, eln, ek := noderow(appname, node, path, role, name, true)
+									out = append(out, pickfmt(ejs, eln))
+									keys = append(keys, ek)
 									n = n + 1
 								}
 							}
@@ -674,8 +681,49 @@ var findMethod = "collection"
 var wantAll = false
 var wantRole = ""
 var wantText = ""
+var wantExpand = false
+var wantExpandMax = 25
+var wantExpandWait = 400
+var wantFormat = "json"
+var rowkeys = []string{}
 
-func nodejson(appname, node, path, role, name, refok) (r) {
+// cleanline strips characters that would break one-element-per-line output.
+func cleanline(s) (r) {
+	r = replace(replace(s, "\t", " "), "\n", " ")
+}
+
+// pickfmt selects the row representation per --format.
+func pickfmt(js, ln) (r) {
+	r = js
+	if wantFormat == "lines" {
+		r = ln
+	}
+}
+
+// stateflags renders the compact flag column for --format lines:
+// d=isabled, f=focused, e=editable, plus caller extras (u=unpathable,
+// g=geometry ref).
+func stateflags(en, fo, ed, extra) (r) {
+	r = ""
+	if !en {
+		r = r + "d"
+	}
+	if fo {
+		r = r + "f"
+	}
+	if ed {
+		r = r + "e"
+	}
+	r = r + extra
+	if len(r) == 0 {
+		r = "-"
+	}
+}
+
+// noderow renders one element in BOTH output formats plus a dedup key. js is
+// the JSON object, ln the --format lines row, and key identifies the node
+// across expand passes (path for provable refs, role+name otherwise).
+func noderow(appname, node, path, role, name, refok) (js, ln, key) {
 	x, y, w, h := extents(node)
 	nacts := 0
 	act0 := ""
@@ -687,11 +735,18 @@ func nodejson(appname, node, path, role, name, refok) (r) {
 		}
 		g_object_unref(ai)
 	}
-	fields := []string{}
 	rf := ""
 	if refok {
 		rf = mkref(appname, path, role, name)
 	}
+	key = path
+	if !refok {
+		key = "U|" + role + "|" + name
+	}
+	en := hasstate(node, ST_ENABLED)
+	fo := hasstate(node, ST_FOCUSED)
+	ed := hasstate(node, ST_EDITABLE)
+	fields := []string{}
 	fields = append(fields, jkv("ref", jstr(rf)))
 	fields = append(fields, jkv("ref_ok", jbool(refok)))
 	fields = append(fields, jkv("ref_kind", jstr("path")))
@@ -705,13 +760,23 @@ func nodejson(appname, node, path, role, name, refok) (r) {
 	fields = append(fields, jkv("cy", str(y+h/2)))
 	fields = append(fields, jkv("actions", str(nacts)))
 	fields = append(fields, jkv("action", jstr(act0)))
-	fields = append(fields, jkv("enabled", jbool(hasstate(node, ST_ENABLED))))
-	fields = append(fields, jkv("focused", jbool(hasstate(node, ST_FOCUSED))))
-	fields = append(fields, jkv("editable", jbool(hasstate(node, ST_EDITABLE))))
-	r = "{" + join(fields, ",") + "}"
+	fields = append(fields, jkv("enabled", jbool(en)))
+	fields = append(fields, jkv("focused", jbool(fo)))
+	fields = append(fields, jkv("editable", jbool(ed)))
+	js = "{" + join(fields, ",") + "}"
+	lact := act0
+	if nacts > 1 {
+		lact = lact + "+" + str(nacts-1)
+	}
+	lxtra := ""
+	if !refok {
+		lxtra = "u"
+	}
+	ln = rf + "\t" + role + "\t" + cleanline(name) + "\t" + str(x) + "," + str(y) + "," + str(w) + "," + str(h) + "\t" + lact + "\t" + stateflags(en, fo, ed, lxtra)
 }
 
-func nodegeomjson(appname, node, roleid, x, y, w, h, role, name) (r) {
+// nodegeomrow is noderow for elements addressed by on-screen rectangle.
+func nodegeomrow(appname, node, roleid, x, y, w, h, role, name) (js, ln, key) {
 	nacts := 0
 	act0 := ""
 	ai := atspi_accessible_get_action_iface(node)
@@ -722,8 +787,13 @@ func nodegeomjson(appname, node, roleid, x, y, w, h, role, name) (r) {
 		}
 		g_object_unref(ai)
 	}
+	grf := geomref(appname, roleid, x, y, w, h, role, name)
+	key = "G|" + role + "|" + name
+	en := hasstate(node, ST_ENABLED)
+	fo := hasstate(node, ST_FOCUSED)
+	ed := hasstate(node, ST_EDITABLE)
 	f := []string{}
-	f = append(f, jkv("ref", jstr(geomref(appname, roleid, x, y, w, h, role, name))))
+	f = append(f, jkv("ref", jstr(grf)))
 	f = append(f, jkv("ref_ok", "true"))
 	f = append(f, jkv("ref_kind", jstr("geometry")))
 	f = append(f, jkv("role", jstr(role)))
@@ -736,10 +806,15 @@ func nodegeomjson(appname, node, roleid, x, y, w, h, role, name) (r) {
 	f = append(f, jkv("cy", str(y+h/2)))
 	f = append(f, jkv("actions", str(nacts)))
 	f = append(f, jkv("action", jstr(act0)))
-	f = append(f, jkv("enabled", jbool(hasstate(node, ST_ENABLED))))
-	f = append(f, jkv("focused", jbool(hasstate(node, ST_FOCUSED))))
-	f = append(f, jkv("editable", jbool(hasstate(node, ST_EDITABLE))))
-	r = "{" + join(f, ",") + "}"
+	f = append(f, jkv("enabled", jbool(en)))
+	f = append(f, jkv("focused", jbool(fo)))
+	f = append(f, jkv("editable", jbool(ed)))
+	js = "{" + join(f, ",") + "}"
+	lact := act0
+	if nacts > 1 {
+		lact = lact + "+" + str(nacts-1)
+	}
+	ln = grf + "\t" + role + "\t" + cleanline(name) + "\t" + str(x) + "," + str(y) + "," + str(w) + "," + str(h) + "\t" + lact + "\t" + stateflags(en, fo, ed, "g")
 }
 
 func keep(role, name) (b) {
@@ -777,7 +852,9 @@ func walk(appname, node, path, depth, maxdepth) {
 	if keep(role, name) && hasstate(node, ST_SHOWING) {
 		x, y, w, h := extents(node)
 		if w > 0 && h > 0 {
-			rows = append(rows, nodejson(appname, node, path, role, name, true))
+			wjs, wln, wk := noderow(appname, node, path, role, name, true)
+			rows = append(rows, pickfmt(wjs, wln))
+			rowkeys = append(rowkeys, wk)
 		}
 	}
 	n := atspi_accessible_get_child_count(node, 0)
@@ -886,6 +963,169 @@ func cmd_windows(appfilter) (out, code) {
 	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("windows", jarr(items)) + "," + jkv("count", str(len(items))) + "}"
 }
 
+// statepass runs ONE perception pass — collection first, walk fallback — and
+// fills the globals rows/rowkeys. Shared by cmd_state and the expand loop.
+func statepass(appname, app, maxdepth, maxnodes) (method, unknown) {
+	rows = []string{}
+	rowkeys = []string{}
+	budget = maxnodes
+	method = "collection"
+	unknown = ""
+	cok := false
+	if !forceWalk {
+		crows, ckeys, _, okc, unk, unp := collect(appname, app, wantRole, maxnodes)
+		unknown = unk
+		cok = okc
+		if okc {
+			rows = crows
+			rowkeys = ckeys
+			// A collection match whose path could not be proven has no ref.
+			// Unless the caller explicitly asked for the collection path,
+			// prefer a complete answer over a fast one and re-run as a walk.
+			if unp > 0 && !forceCollection {
+				cok = false
+				method = "collection+walk"
+				rows = []string{}
+				rowkeys = []string{}
+			}
+		}
+	}
+	if !cok {
+		if method == "collection" {
+			method = "walk"
+		}
+		walk(appname, app, "", 0, maxdepth)
+	}
+}
+
+// scrollfwdidx returns the scrollForward (preferred) or scrollDown action
+// index on a node, -1 if it has neither.
+func scrollfwdidx(node) (idx) {
+	idx = -1
+	ai := atspi_accessible_get_action_iface(node)
+	if ai == 0 {
+		return
+	}
+	na := atspi_action_get_n_actions(ai, 0)
+	i := 0
+	while i < na {
+		an := to_lower(takestr(atspi_action_get_action_name(ai, i, 0)))
+		if an == "scrollforward" {
+			idx = i
+		}
+		if an == "scrolldown" && idx < 0 {
+			idx = i
+		}
+		i = i + 1
+	}
+	g_object_unref(ai)
+}
+
+// findscrollnode returns the first scrollable container exposing a scroll
+// FORWARD/DOWN action — e.g. Chromium's document web — as a NEW ref the
+// caller must unref, plus the action index. Collection query over the
+// document/scroll-pane roles first (one D-Bus call per window); bounded DFS
+// fallback for apps without the Collection interface.
+func findscrollnode(app) (sn, sidx) {
+	sn = 0
+	sidx = -1
+	ra := lu_roles_new()
+	names := []string{"document web", "document frame", "scroll pane"}
+	i := 0
+	while i < len(names) {
+		rid := lu_role_from_name(names[i])
+		if rid >= 0 {
+			lu_roles_add(ra, rid)
+		}
+		i = i + 1
+	}
+	rule := lu_rule_new(ra, 1)
+	nwin := atspi_accessible_get_child_count(app, 0)
+	w := 0
+	while w < nwin && sn == 0 {
+		win := atspi_accessible_get_child_at_index(app, w, 0)
+		if win != 0 {
+			arr := lu_matches(win, rule, 200)
+			if arr != 0 {
+				cnt := lu_arr_len(arr)
+				i = 0
+				while i < cnt && sn == 0 {
+					node := lu_arr_get(arr, i)
+					if node != 0 {
+						si := scrollfwdidx(node)
+						if si >= 0 {
+							sn = g_object_ref(node)
+							sidx = si
+						}
+					}
+					i = i + 1
+				}
+				lu_arr_free(arr)
+			}
+			g_object_unref(win)
+		}
+		w = w + 1
+	}
+	lu_rule_free(rule)
+	lu_roles_free(ra)
+	if sn == 0 {
+		fsVisited = 0
+		sn, sidx = findscrollnode_dfs(app, 0)
+	}
+}
+
+var fsVisited = 0
+func findscrollnode_dfs(node, depth) (sn, sidx) {
+	sn = 0
+	sidx = -1
+	if fsVisited > 1500 || depth > 15 {
+		return
+	}
+	fsVisited = fsVisited + 1
+	role := to_lower(noderole(node))
+	if contains(role, "scroll") || contains(role, "document") {
+		sidx = scrollfwdidx(node)
+	}
+	if sidx >= 0 {
+		sn = node
+		return
+	}
+	k := atspi_accessible_get_child_count(node, 0)
+	i := 0
+	while i < k && i < 40 && sn == 0 {
+		c := atspi_accessible_get_child_at_index(node, i, 0)
+		if c != 0 {
+			sn, sidx = findscrollnode_dfs(c, depth+1)
+			if sn == 0 {
+				g_object_unref(c)
+			}
+			i = i + 1
+		}
+	}
+}
+
+// scrollbackidx finds the scroll BACKWARD/UP action index on a node (-1).
+func scrollbackidx(node) (idx) {
+	idx = -1
+	ai := atspi_accessible_get_action_iface(node)
+	if ai == 0 {
+		return
+	}
+	na := atspi_action_get_n_actions(ai, 0)
+	i := 0
+	while i < na {
+		an := to_lower(takestr(atspi_action_get_action_name(ai, i, 0)))
+		if an == "scrollbackward" {
+			idx = i
+		}
+		if an == "scrollup" && idx < 0 {
+			idx = i
+		}
+		i = i + 1
+	}
+	g_object_unref(ai)
+}
+
 func cmd_state(appname, maxdepth, maxnodes) (out, code) {
 	code = EX_OK
 	out = ""
@@ -900,58 +1140,145 @@ func cmd_state(appname, maxdepth, maxnodes) (out, code) {
 		out = errjson("app_not_found", "no application named '"+appname+"' in the accessibility tree", true, []string{"run: linux-use apps", "the app may not be running, or may not export accessibility (see: linux-use doctor)"})
 		return
 	}
-	rows = []string{}
 	budget = maxnodes
 	visited = 0
 	deepest = 0
 	depthCut = false
-	method := "collection"
-	unknown := ""
-	geomCount := 0
 	t0 := now_ms()
-	cok := false
-	if !forceWalk {
-		crows, _, okc, unk, unp := collect(appname, app, wantRole, maxnodes)
-		unknown = unk
-		cok = okc
-		geomUsed := geomrefs
-		if okc {
-			rows = crows
-			geomCount = geomUsed
-			// A collection match whose path could not be proven has no ref.
-			// Unless the caller explicitly asked for the collection path,
-			// prefer a complete answer over a fast one and re-run as a walk.
-			if unp > 0 && !forceCollection {
-				cok = false
-				method = "collection+walk"
-				rows = []string{}
+	method, unknown := statepass(appname, app, maxdepth, maxnodes)
+	geomCount := geomrefs
+	ms := now_ms() - t0
+	merged := []string{}
+	mi := 0
+	while mi < len(rows) {
+		merged = append(merged, rows[mi])
+		mi = mi + 1
+	}
+	passes := 0
+	scrolled := 0
+	expanded := false
+	expandMs := 0
+	if wantExpand {
+		// Chromium materializes AX nodes for the viewport plus a margin, so a
+		// single pass sees only the on-screen slice. Prefer the scrollable
+		// container's own scrollForward/scrollDown action (a full viewport
+		// per call, works occluded, no pointer); fall back to XTEST wheel
+		// clicks at the window center when no scroll action exists.
+		expandMethod := "wheel"
+		snode, saction := findscrollnode(app)
+		if snode != 0 {
+			expandMethod = "action"
+		}
+		cx := 0
+		cy := 0
+		win := atspi_accessible_get_child_at_index(app, 0, 0)
+		if win != 0 {
+			wx, wy, ww, wh := extents(win)
+			g_object_unref(win)
+			cx = wx + ww / 2
+			cy = wy + wh / 2
+		}
+		seen := "|" + join(rowkeys, "|") + "|"
+		canScroll := snode != 0 || (cx > 0 && cy > 0)
+		if !canScroll {
+			write(2, "warning: --expand found no scroll action and no window geometry; returning the first pass\n")
+		}
+		idle := 0
+		keepGoing := canScroll
+		et0 := now_ms()
+		while keepGoing {
+			scrolledOk := false
+			if snode != 0 {
+				sai := atspi_accessible_get_action_iface(snode)
+				if sai != 0 {
+					scrolledOk = atspi_action_do_action(sai, saction, 0)
+					g_object_unref(sai)
+				}
+			} else {
+				scrolledOk = clickxy(cx, cy, 5)
+			}
+			if !scrolledOk {
+				write(2, "warning: --expand could not scroll; returning what was seen\n")
+				keepGoing = false
+			} else {
+				scrolled = scrolled + 1
+				sleep(wantExpandWait)
+				_, _ = statepass(appname, app, maxdepth, maxnodes)
+				added := 0
+				i := 0
+				while i < len(rowkeys) {
+					k := rowkeys[i]
+					if !contains(seen, "|"+k+"|") {
+						seen = seen + k + "|"
+						merged = append(merged, rows[i])
+						added = added + 1
+					}
+					i = i + 1
+				}
+				if added == 0 {
+					idle = idle + 1
+				} else {
+					idle = 0
+				}
+				passes = passes + 1
+				if passes >= wantExpandMax || idle >= 2 {
+					keepGoing = false
+				}
 			}
 		}
-	}
-	if !cok {
-		if method == "collection" {
-			method = "walk"
+		expandMs = now_ms() - et0
+		// Put the scroll position back roughly where it was.
+		i := 0
+		if snode != 0 {
+			bidx := scrollbackidx(snode)
+			if bidx >= 0 {
+				sai := atspi_accessible_get_action_iface(snode)
+				if sai != 0 {
+					while i < scrolled {
+						atspi_action_do_action(sai, bidx, 0)
+						i = i + 1
+					}
+					g_object_unref(sai)
+				}
+			}
+			g_object_unref(snode)
+		} else {
+			while i < scrolled {
+				clickxy(cx, cy, 4)
+				i = i + 1
+			}
 		}
-		walk(appname, app, "", 0, maxdepth)
+		expanded = scrolled > 0
+		if expanded {
+			write(2, "expand: "+str(scrolled)+" scrolls via "+expandMethod+", "+str(len(merged))+" elements merged\n")
+		}
 	}
-	ms := now_ms() - t0
+	rows = merged
 	g_object_unref(app)
 	trunc := budget <= 0
-	f := []string{}
-	f = append(f, jkv("schema", jstr(SCHEMA)))
-	f = append(f, jkv("ok", "true"))
-	f = append(f, jkv("app", jstr(appname)))
-	f = append(f, jkv("elements", jarr(rows)))
-	f = append(f, jkv("count", str(len(rows))))
-	f = append(f, jkv("walk_ms", str(ms)))
-	f = append(f, jkv("nodes_visited", str(visited)))
-	f = append(f, jkv("deepest", str(deepest)))
-	f = append(f, jkv("depth_limit", str(maxdepth)))
-	f = append(f, jkv("depth_limited", jbool(depthCut)))
-	f = append(f, jkv("truncated", jbool(trunc)))
-	f = append(f, jkv("method", jstr(method)))
-	f = append(f, jkv("geometry_refs", str(geomCount)))
-	out = "{" + join(f, ",") + "}"
+	if wantFormat == "lines" {
+		hdr := "# linux-use state app=" + appname + " count=" + str(len(rows)) + " method=" + method + " walk_ms=" + str(ms) + " truncated=" + jbool(trunc) + " depth_limited=" + jbool(depthCut) + " expanded=" + jbool(expanded) + " expand_passes=" + str(passes)
+		out = hdr + "\n" + join(rows, "\n")
+	} else {
+		f := []string{}
+		f = append(f, jkv("schema", jstr(SCHEMA)))
+		f = append(f, jkv("ok", "true"))
+		f = append(f, jkv("app", jstr(appname)))
+		f = append(f, jkv("elements", jarr(rows)))
+		f = append(f, jkv("count", str(len(rows))))
+		f = append(f, jkv("walk_ms", str(ms)))
+		f = append(f, jkv("expand_ms", str(expandMs)))
+		f = append(f, jkv("nodes_visited", str(visited)))
+		f = append(f, jkv("deepest", str(deepest)))
+		f = append(f, jkv("depth_limit", str(maxdepth)))
+		f = append(f, jkv("depth_limited", jbool(depthCut)))
+		f = append(f, jkv("truncated", jbool(trunc)))
+		f = append(f, jkv("method", jstr(method)))
+		f = append(f, jkv("geometry_refs", str(geomCount)))
+		f = append(f, jkv("expanded", jbool(expanded)))
+		f = append(f, jkv("expand_passes", str(passes)))
+		out = "{" + join(f, ",") + "}"
+	}
 	if len(unknown) > 0 {
 		write(2, "warning: unknown role '" + unknown + "' — it matched nothing; check: linux-use roles\n")
 	}
@@ -980,10 +1307,11 @@ func cmd_find(query, appfilter, maxdepth, maxnodes) (out, code) {
 			nm := qualify_app(a, nodename(a))
 			if app_matches(a, nodename(a), appfilter) {
 				rows = []string{}
+				rowkeys = []string{}
 				budget = maxnodes
 				cok := false
 				if !forceWalk {
-					crows, _, okc, _, unp := collect(nm, a, wantRole, maxnodes)
+					crows, _, _, okc, _, unp := collect(nm, a, wantRole, maxnodes)
 					cok = okc
 					if okc {
 						rows = crows
@@ -1009,18 +1337,22 @@ func cmd_find(query, appfilter, maxdepth, maxnodes) (out, code) {
 		i = i + 1
 	}
 	ms := now_ms() - t0
-	f := []string{}
-	f = append(f, jkv("schema", jstr(SCHEMA)))
-	f = append(f, jkv("ok", "true"))
-	f = append(f, jkv("query", jstr(query)))
-	f = append(f, jkv("matches", jarr(all)))
-	f = append(f, jkv("count", str(len(all))))
-	f = append(f, jkv("search_ms", str(ms)))
-	f = append(f, jkv("nodes_visited", str(visited)))
-	f = append(f, jkv("deepest", str(deepest)))
-	f = append(f, jkv("depth_limited", jbool(depthCut)))
-	f = append(f, jkv("method", jstr(findMethod)))
-	out = "{" + join(f, ",") + "}"
+	if wantFormat == "lines" {
+		out = "# linux-use find query=" + cleanline(query) + " count=" + str(len(all)) + " search_ms=" + str(ms) + " method=" + findMethod + " depth_limited=" + jbool(depthCut) + "\n" + join(all, "\n")
+	} else {
+		f := []string{}
+		f = append(f, jkv("schema", jstr(SCHEMA)))
+		f = append(f, jkv("ok", "true"))
+		f = append(f, jkv("query", jstr(query)))
+		f = append(f, jkv("matches", jarr(all)))
+		f = append(f, jkv("count", str(len(all))))
+		f = append(f, jkv("search_ms", str(ms)))
+		f = append(f, jkv("nodes_visited", str(visited)))
+		f = append(f, jkv("deepest", str(deepest)))
+		f = append(f, jkv("depth_limited", jbool(depthCut)))
+		f = append(f, jkv("method", jstr(findMethod)))
+		out = "{" + join(f, ",") + "}"
+	}
 	if depthCut && findMethod == "walk" {
 		write(2, "warning: subtrees were cut at --depth " + str(maxdepth) + "; raise --depth if the target is missing\n")
 	}
@@ -2134,7 +2466,8 @@ func guide_json() (r) {
 	g = append(g, jstr("For a label whose NAME IS ITS TEXT, the fingerprint changes whenever the text changes, so a ref captured from an event will report ref_stale on the next read. That is the mechanism working: the staleness IS the signal that the content changed. Re-run state, or drop the #fingerprint to address the path alone."))
 	g = append(g, jstr("OBSERVER EFFECT: reading the tree (state/find) can itself make toolkits emit accessibility events. If you run 'watch' while also polling 'state', expect self-induced noise — especially object:state-changed:*, which is why it is not in the default event set."))
 	g = append(g, jstr("Large apps (browsers) have huge trees. Use --role, --depth, or 'find' rather than dumping everything; a truncated walk warns on stderr and sets truncated:true."))
-	g = append(g, jstr("On long web pages, state/find only see the nodes Chromium has realized — roughly the viewport plus a margin (measured: a 300-row table exposed ~55 rows). Widgets below the fold are absent from the tree entirely, so find returns no match for them. Scroll the page (wheel click --button 5) and re-run state to reach them."))
+	g = append(g, jstr("On long web pages, state/find only see the nodes Chromium has realized — roughly the viewport plus a margin (measured: a 300-row table exposed ~55 rows). Widgets below the fold are absent from the tree entirely, so find returns no match for them. 'state --expand' automates the fix: it invokes the scrollable container's scrollForward/scrollDown accessible action when one exists (a full viewport per call, works occluded, no pointer) or XTEST wheel clicks at the window center otherwise, merges each pass by ref path, then scrolls back — envelope fields expanded/expand_passes/expand_ms report what happened; --expand-passes/--expand-wait tune it. Manual equivalent: scroll (click --button 5) then re-run state."))
+	g = append(g, jstr("state and find take --format lines: one element per line (ref, role, name, x,y,w,h, action, flags) — roughly half the tokens of the JSON envelope. Metadata moves to a leading # line; errors stay JSON."))
 	g = append(g, jstr("NEVER automate the user's LIVE browser profile with Playwright/CDP: the forced --use-mock-keychain makes the cookie DB undecryptable and Chromium RESETS it (all site sessions wiped, unrecoverable — secure_delete zeroes deleted rows). Same for --user-data-dir=<real profile>. Always use a dedicated profile dir (contrib/a11y-browser) or a throwaway COPY of the profile. Driving the live session via AT-SPI (this tool) is safe; it touches no profile internals. Also note: the Edge process is 'msedge', not 'microsoft-edge' — a pgrep for the latter sees nothing while the browser is running."))
 	c = append(c, jkv("gotchas", jarr(g)))
 
@@ -2184,8 +2517,8 @@ func helpjson() (r) {
 	cmds := []string{}
 	cmds = append(cmds, "{"+jkv("name", jstr("apps"))+","+jkv("args", jarr([]string{}))+","+jkv("summary", jstr("list applications with pid, toolkit and window count; flags ambiguous names"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("windows"))+","+jkv("args", jarr([]string{jstr("--app")}))+","+jkv("summary", jstr("list top-level windows with geometry and active state"))+"}")
-	cmds = append(cmds, "{"+jkv("name", jstr("state"))+","+jkv("args", jarr([]string{jstr("--app (required)"), jstr("--depth"), jstr("--role"), jstr("--all")}))+","+jkv("summary", jstr("interactive elements of an app, with refs"))+"}")
-	cmds = append(cmds, "{"+jkv("name", jstr("find"))+","+jkv("args", jarr([]string{jstr("<query>"), jstr("--app"), jstr("--role"), jstr("--depth")}))+","+jkv("summary", jstr("search elements by name substring"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("state"))+","+jkv("args", jarr([]string{jstr("--app (required)"), jstr("--depth"), jstr("--role"), jstr("--all"), jstr("--expand"), jstr("--format")}))+","+jkv("summary", jstr("interactive elements of an app, with refs; --expand scrolls to realize below-fold nodes, --format lines is compact"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("find"))+","+jkv("args", jarr([]string{jstr("<query>"), jstr("--app"), jstr("--role"), jstr("--depth"), jstr("--format")}))+","+jkv("summary", jstr("search elements by name substring"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("act"))+","+jkv("args", jarr([]string{jstr("<ref>"), jstr("--action N")}))+","+jkv("summary", jstr("invoke the element's accessible action (preferred)"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("read"))+","+jkv("args", jarr([]string{jstr("<ref>")}))+","+jkv("summary", jstr("read an element's text, name and description"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("type"))+","+jkv("args", jarr([]string{jstr("<ref>"), jstr("<text>"), jstr("--replace"), jstr("--allow-password")}))+","+jkv("summary", jstr("insert text via the editable-text interface"))+"}")
@@ -2376,6 +2709,10 @@ func run_cmd(argv) (out, code) {
 	fs = flag_bool(fs, "collection", "", "force a server-side collection query")
 	fs = flag_bool(fs, "replace", "", "replace existing text instead of inserting")
 	fs = flag_bool(fs, "allow-password", "", "permit typing into a password field")
+	fs = flag_bool(fs, "expand", "", "state: scroll through the app and merge realized nodes")
+	fs = flag_int(fs, "expand-passes", "", "25", "expand: maximum scroll passes")
+	fs = flag_int(fs, "expand-wait", "", "400", "expand: settle ms per scroll pass")
+	fs = flag_str(fs, "format", "", "json", "output format: json|lines")
 	fs = flag_bool(fs, "human", "", "human-readable output (guide only)")
 	fs = parse_flags(fs, rest)
 	pos := flag_args(fs)
@@ -2395,6 +2732,10 @@ func run_cmd(argv) (out, code) {
 	forceWalk = flag_on(fs, "walk") || flag_on(fs, "all")
 	wantRole = flag_get(fs, "role")
 	wantText = ""
+	wantExpand = flag_on(fs, "expand")
+	wantExpandMax = flag_int_val(fs, "expand-passes")
+	wantExpandWait = flag_int_val(fs, "expand-wait")
+	wantFormat = flag_get(fs, "format")
 	depth := flag_int_val(fs, "depth")
 	maxnodes := flag_int_val(fs, "max-nodes")
 	wantPid = flag_int_val(fs, "pid")
@@ -2504,6 +2845,11 @@ func run_cmd(argv) (out, code) {
 			out = errjson("missing_app", "state needs --app <name>", true, []string{"run: linux-use apps"})
 			return
 		}
+		if wantFormat != "json" && wantFormat != "lines" {
+			code = EX_USAGE
+			out = errjson("bad_format", "--format must be 'json' or 'lines'", true, []string{"example: linux-use state --app gnome-calculator --format lines"})
+			return
+		}
 		out, code = cmd_state(appname, depth, maxnodes)
 		return
 	}
@@ -2515,6 +2861,11 @@ func run_cmd(argv) (out, code) {
 		if len(pos) < 1 {
 			code = EX_USAGE
 			out = errjson("missing_query", "find needs a query string", true, []string{"example: linux-use find Save --app gedit"})
+			return
+		}
+		if wantFormat != "json" && wantFormat != "lines" {
+			code = EX_USAGE
+			out = errjson("bad_format", "--format must be 'json' or 'lines'", true, []string{"example: linux-use find Save --format lines"})
 			return
 		}
 		out, code = cmd_find(pos[0], flag_get(fs, "app"), depth, maxnodes)
