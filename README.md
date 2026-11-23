@@ -426,6 +426,29 @@ Ambiguous `--app` reports `app_ambiguous` under exit `80`.
   ~1000 events, v0.3 and v0.4 both grow ~190 kB per 1000 events. Bound long
   watches with `--duration`/`--max-events`; see Known limitations.
 
+## vs CDP browser tools (flashbrowse, Playwright) — measured
+
+Same machine, dedicated-profile Edge on Xvfb (linux-use 0.7.1) vs headless
+Chrome over CDP ([flashbrowse](https://github.com/nhrbuilds/flashbrowse)
+v1.2.1, built from source):
+
+| page | linux-use `state` | flashbrowse `open` |
+|---|---|---|
+| 300-row table (1,500 widgets) | 0.7 s — but only **568 elements**: rows ~0–54, the rest never entered the AT-SPI tree | ~1.4 s incl. cold Chrome spawn — **all 1,200 actions** |
+| 3,000-row table (15,000 widgets) | 0.85 s — same ~560-element window; `--all` 4.6 s, truncated at 20k nodes | no output in 90 s — full-AX-tree fetch/settle never finished |
+
+Neither number is a "linux-use is faster" claim. AT-SPI is fast because
+Chromium only materializes AX nodes near the viewport — `find` cannot locate a
+widget below the fold until you scroll it into view (`click --x N --y N
+--button 5`, then re-run `state`). CDP sees the whole document in one shot
+(flashbrowse's compressed action tree also runs ~7–18x fewer tokens than
+Playwright AX snapshots) but pays full-tree cost, which collapses on very
+heavy pages. The honest split: **a CDP tool is the right answer for websites
+with no live-session requirement; linux-use is the only door when the target
+is the user's signed-in browser** (Chrome refuses `--remote-debugging-port`
+on the default profile), the browser chrome itself, or anything that is not
+a web page.
+
 ## Hard-won machin FFI findings
 
 These cost real debugging time and are the non-obvious part of this codebase.
@@ -484,6 +507,10 @@ These cost real debugging time and are the non-obvious part of this codebase.
 - **Wayland is unsupported for synthetic input.** XTEST cannot reach native
   Wayland clients, so `click`/`key` are X11-only. AT-SPI `act`/`type`/`read`
   still work. This is the single biggest gap: Ubuntu 24.04+ defaults to Wayland.
+- **On long web pages, `state`/`find` see only viewport-realized nodes.**
+  Measured: a 300-row table exposed ~55 rows. Widgets below the fold are
+  absent from the tree entirely — scroll, then re-run `state`. See the CDP
+  comparison above for when a full-document tool is the better fit.
 - **No automated tests.** See above.
 - **x86-64 only.** No arm64 build.
 - The tree walk is still recursive with a node budget; it warns and sets

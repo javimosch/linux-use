@@ -32,7 +32,7 @@ binary and is always current for the installed version.
 | Read what an app is currently displaying | **linux-use** `state` / `read` |
 | Wait for a UI change | **linux-use** `watch` |
 | Drive a terminal TUI (an AI CLI, htop, vim) | **tmux**, not this — `tmux send-keys` / `capture-pane` gives a deterministic text buffer |
-| Scrape or automate a website with no session requirement | **playwright/agent-browser**, far more reliable |
+| Scrape or automate a website with no session requirement | **flashbrowse** (CDP, full-DOM action tree) or playwright/agent-browser — far more reliable, and sees the whole page without scrolling |
 | Send a message / create a record when an API exists | **the API** — GUI automation is the last resort |
 
 Do not reach for this when a CLI or API can do the job. It is for when the GUI
@@ -169,7 +169,8 @@ serve | daemon start|stop|status
    will clear a low threshold), and reject a near-uniform frame — max
    per-channel spread under ~12 is the cheapest possible check for this whole
    family, and it costs four lines.
-13. **Two apps with the same name: AT-SPI is a per-user bus.** When a
+13. **On long web pages, `state`/`find` only see what Chromium has realized.** It materializes AX nodes for roughly the viewport plus a margin — a 300-row table exposed only ~55 rows (568 elements), and `find` returned 0 matches for widgets that exist in the DOM below the fold. To reach them, scroll (`click --x N --y N --button 5`) and re-run `state`; repeat until found. A CDP tool (flashbrowse) reads the complete document tree in one shot with no scrolling — but only on a browser launched with a debugging port on a non-default profile, and very heavy pages (>15k widgets) can stall its tree fetch entirely.
+14. **Two apps with the same name: AT-SPI is a per-user bus.** When a
    dedicated-profile browser runs on a virtual display alongside the user's
    real browser, both appear in `linux-use apps` with the same name.
    `linux-use state --app "Microsoft Edge"` fails with `app_ambiguous`
