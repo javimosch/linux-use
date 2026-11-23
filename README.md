@@ -426,30 +426,49 @@ Ambiguous `--app` reports `app_ambiguous` under exit `80`.
   ~1000 events, v0.3 and v0.4 both grow ~190 kB per 1000 events. Bound long
   watches with `--duration`/`--max-events`; see Known limitations.
 
-## vs CDP browser tools (flashbrowse, Playwright) — measured
+## vs CDP browser tools (flashbrowse, Playwright) — measured, and complementary
 
 Same machine, dedicated-profile Edge on Xvfb (linux-use 0.7.1) vs headless
 Chrome over CDP ([flashbrowse](https://github.com/nhrbuilds/flashbrowse)
 v1.2.1, built from source):
 
-| page | linux-use `state` | flashbrowse `open` |
-|---|---|---|
-| 300-row table (1,500 widgets) | 0.7 s — but only **568 elements**: rows ~0–54, the rest never entered the AT-SPI tree | ~1.4 s incl. cold Chrome spawn — **all 1,200 actions** |
-| 3,000-row table (15,000 widgets) | 0.85 s — same ~560-element window; `--all` 4.6 s, truncated at 20k nodes | no output in 90 s — full-AX-tree fetch/settle never finished |
+| page | linux-use `state` | linux-use `state --expand` | flashbrowse `open` |
+|---|---|---|---|
+| 300-row table (1,500 widgets) | 0.7 s — 568 elements: rows ~0–54, the rest never entered the AT-SPI tree | ~6 s — **all 300 rows (3,018 elements)** | ~1.4 s incl. cold Chrome spawn — **all 1,200 actions** |
+| 3,000-row table (15,000 widgets) | 0.85 s — same ~560-element window; `--all` 4.6 s, truncated at 20k nodes | incremental (per-viewport scrolls, no all-or-nothing fetch) | no output in 90 s — full-AX-tree fetch/settle never finished |
 
-Neither number is a "linux-use is faster" claim. AT-SPI is fast because
-Chromium only materializes AX nodes near the viewport — `find` cannot locate a
-widget below the fold until you scroll it into view — `state --expand`
-automates this (drives the scrollable container's own `scrollForward`
-accessible action, merges each pass by ref path; all 300 rows of the test
-page in 8 scrolls / ~6 s). CDP sees the whole document in one shot
-(flashbrowse's compressed action tree also runs ~7–18x fewer tokens than
-Playwright AX snapshots) but pays full-tree cost, which collapses on very
-heavy pages. The honest split: **a CDP tool is the right answer for websites
-with no live-session requirement; linux-use is the only door when the target
-is the user's signed-in browser** (Chrome refuses `--remote-debugging-port`
-on the default profile), the browser chrome itself, or anything that is not
-a web page.
+Neither column is a "linux-use is faster" claim. AT-SPI is fast because
+Chromium only materializes AX nodes near the viewport; `--expand` closes the
+coverage gap by driving the scrollable container's own `scrollForward`
+accessible action and merging passes by ref path — incremental, so it still
+completes on pages where a full-tree fetch stalls.
+
+**The two tools are complements, not competitors.** flashbrowse reads the
+whole document in one shot from a browser it owns — the right answer for
+websites with no live-session requirement (public-web scraping, CI
+automation; its compressed action tree also runs ~7–18x fewer tokens than
+Playwright AX snapshots). linux-use is the only door when the target is the
+user's signed-in browser (Chrome refuses `--remote-debugging-port` on the
+default profile), the browser chrome itself (omnibox, dialogs, permission
+prompts), or anything that is not a web page. A typical agent run uses both:
+flashbrowse for the public web, linux-use for the session.
+
+### Closing the remaining gap — roadmap
+
+- [x] **coverage** — `state --expand`: whole page via the container's own
+  scroll actions (landed)
+- [x] **payload size** — `--format lines`: ~half the tokens of the JSON
+  envelope (landed)
+- [ ] **`find --expand`** — sweep until the match appears instead of dumping
+  everything; most below-the-fold queries never need the full tree
+- [ ] **adaptive settle** — poll for post-scroll tree mutation instead of a
+  fixed `--expand-wait`; should cut the ~6 s sweep toward ~2–3 s
+- [ ] **CDP fast path** (`state --via cdp`) — only for dedicated-profile
+  instances launched with `--remote-debugging-port`; matches flashbrowse
+  speed on web content while AT-SPI keeps covering chrome/desktop. Never
+  against the live profile.
+- [ ] **metrics trail** — flashbrowse-style `stats` (op, ms, node count) so
+  future speed claims stay honest
 
 ## Hard-won machin FFI findings
 
