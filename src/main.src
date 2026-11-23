@@ -81,6 +81,7 @@ extern "lu" {
 	fn lu_ws_open(string) i32
 	fn lu_ws_call(i32, string) ptr
 	fn lu_ws_close(i32)
+	fn getpid() i32
 }
 
 extern "x11" {
@@ -114,6 +115,8 @@ var EX_NO_DISPLAY = 87
 var EX_DAEMON = 88
 var EX_REFUSED = 89
 var EX_RSS_LIMIT = 90
+var EX_EXT = 100
+var EX_INTERNAL = 110
 
 // AT-SPI enum ordinals (verified against atspi-constants.h on 2.44).
 var ST_ACTIVE = 1
@@ -184,14 +187,14 @@ func jbool(b) (r) {
 // ---------------------------------------------------------------- errors
 
 // errjson builds the cli-output-spec error envelope.
-func errjson(code, msg, recoverable, suggestions) (r) {
+func errjson(exitcode, typ, msg, recoverable, suggestions) (r) {
 	sg := []string{}
 	i := 0
 	while i < len(suggestions) {
 		sg = append(sg, jstr(suggestions[i]))
 		i = i + 1
 	}
-	r = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "false") + "," + jkv("error", "{" + jkv("code", jstr(code)) + "," + jkv("message", jstr(msg)) + "," + jkv("recoverable", jbool(recoverable)) + "," + jkv("suggestions", jarr(sg)) + "}") + "}"
+	r = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "false") + "," + jkv("error", "{" + jkv("code", str(exitcode)) + "," + jkv("type", jstr(typ)) + "," + jkv("message", jstr(msg)) + "," + jkv("recoverable", jbool(recoverable)) + "," + jkv("suggestions", jarr(sg)) + "}") + "}"
 }
 
 // ---------------------------------------------------------------- fingerprints
@@ -1351,11 +1354,11 @@ func cmd_state(appname, maxdepth, maxnodes) (out, code) {
 	if app == 0 {
 		if appAmbiguous > 1 {
 			code = EX_USAGE
-			out = errjson("app_ambiguous", str(appAmbiguous)+" applications are named '"+appname+"'", true, []string{"disambiguate with the pid: --app '" + appname + "#pid<PID>' or --pid <PID>", "list pids with: linux-use apps"})
+			out = errjson(EX_USAGE, "app_ambiguous", str(appAmbiguous)+" applications are named '"+appname+"'", true, []string{"disambiguate with the pid: --app '" + appname + "#pid<PID>' or --pid <PID>", "list pids with: linux-use apps"})
 			return
 		}
 		code = EX_APP_NOT_FOUND
-		out = errjson("app_not_found", "no application named '"+appname+"' in the accessibility tree", true, []string{"run: linux-use apps", "the app may not be running, or may not export accessibility (see: linux-use doctor)"})
+		out = errjson(EX_APP_NOT_FOUND, "app_not_found", "no application named '"+appname+"' in the accessibility tree", true, []string{"run: linux-use apps", "the app may not be running, or may not export accessibility (see: linux-use doctor)"})
 		return
 	}
 	budget = maxnodes
@@ -1507,11 +1510,11 @@ func cmd_state_cdp(appname) (out, code) {
 	if app == 0 {
 		if appAmbiguous > 1 {
 			code = EX_USAGE
-			out = errjson("app_ambiguous", str(appAmbiguous)+" applications are named '"+appname+"'", true, []string{"disambiguate with the pid: --app '" + appname + "#pid<PID>' or --pid <PID>", "list pids with: linux-use apps"})
+			out = errjson(EX_USAGE, "app_ambiguous", str(appAmbiguous)+" applications are named '"+appname+"'", true, []string{"disambiguate with the pid: --app '" + appname + "#pid<PID>' or --pid <PID>", "list pids with: linux-use apps"})
 			return
 		}
 		code = EX_APP_NOT_FOUND
-		out = errjson("app_not_found", "no application named '"+appname+"' in the accessibility tree", true, []string{"run: linux-use apps", "the app may not be running, or may not export accessibility (see: linux-use doctor)"})
+		out = errjson(EX_APP_NOT_FOUND, "app_not_found", "no application named '"+appname+"' in the accessibility tree", true, []string{"run: linux-use apps", "the app may not be running, or may not export accessibility (see: linux-use doctor)"})
 		return
 	}
 	pid := atspi_accessible_get_process_id(app, 0)
@@ -1519,7 +1522,7 @@ func cmd_state_cdp(appname) (out, code) {
 	ws := cdp_ws_url(pid)
 	if len(ws) == 0 {
 		code = EX_USAGE
-		out = errjson("cdp_unavailable", "'"+appname+"' has no --remote-debugging-port on its command line", true, []string{"relaunch the dedicated profile with the flag — contrib/a11y-browser: A11Y_CDP_PORT=PORT", "the live profile cannot expose a debug port (Chromium refuses it) — plain 'state' works there"})
+		out = errjson(EX_USAGE, "cdp_unavailable", "'"+appname+"' has no --remote-debugging-port on its command line", true, []string{"relaunch the dedicated profile with the flag — contrib/a11y-browser: A11Y_CDP_PORT=PORT", "the live profile cannot expose a debug port (Chromium refuses it) — plain 'state' works there"})
 		return
 	}
 	t0 := now_ms()
@@ -1527,7 +1530,7 @@ func cmd_state_cdp(appname) (out, code) {
 	ms := now_ms() - t0
 	if !ok {
 		code = EX_ACTION_FAILED
-		out = errjson("cdp_call_failed", "Runtime.evaluate failed or returned no result", true, []string{"the page may be navigating — retry", "check the ws url: "+ws})
+		out = errjson(EX_ACTION_FAILED, "cdp_call_failed", "Runtime.evaluate failed or returned no result", true, []string{"the page may be navigating — retry", "check the ws url: "+ws})
 		return
 	}
 	rows := []string{}
@@ -1574,24 +1577,24 @@ func cmd_act_cdp(ref) (out, code) {
 	pid := cdppid(app)
 	if pid <= 0 || len(path) == 0 || substr(path, 0, 1) != "/" {
 		code = EX_USAGE
-		out = errjson("bad_ref", "cdp ref must look like 'cdp<PID>:/html/...#fp' — take one from 'state --via cdp'", true, []string{"run: linux-use state --app <app> --via cdp"})
+		out = errjson(EX_USAGE, "bad_ref", "cdp ref must look like 'cdp<PID>:/html/...#fp' — take one from 'state --via cdp'", true, []string{"run: linux-use state --app <app> --via cdp"})
 		return
 	}
 	ws := cdp_ws_url(pid)
 	if len(ws) == 0 {
 		code = EX_USAGE
-		out = errjson("cdp_unavailable", "pid "+str(pid)+" has no --remote-debugging-port on its command line", true, []string{"the browser must have been launched with the flag"})
+		out = errjson(EX_USAGE, "cdp_unavailable", "pid "+str(pid)+" has no --remote-debugging-port on its command line", true, []string{"the browser must have been launched with the flag"})
 		return
 	}
 	v, ok := cdp_eval(ws, "(()=>{var e=document.evaluate(\""+path+"\",document,null,9,null).singleNodeValue;if(!e)return 'missing';e.click();return 'ok'})()")
 	if !ok {
 		code = EX_ACTION_FAILED
-		out = errjson("cdp_call_failed", "Runtime.evaluate failed", true, []string{"the page may be navigating — retry", "re-run: linux-use state --app <app> --via cdp"})
+		out = errjson(EX_ACTION_FAILED, "cdp_call_failed", "Runtime.evaluate failed", true, []string{"the page may be navigating — retry", "re-run: linux-use state --app <app> --via cdp"})
 		return
 	}
 	if v == "missing" {
 		code = EX_REF_STALE
-		out = errjson("ref_stale", "no element at "+path+" — the page changed since the ref was issued", true, []string{"re-run: linux-use state --app <app> --via cdp"})
+		out = errjson(EX_REF_STALE, "ref_stale", "no element at "+path+" — the page changed since the ref was issued", true, []string{"re-run: linux-use state --app <app> --via cdp"})
 		return
 	}
 	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("ref", jstr(ref)) + "," + jkv("action", jstr("click")) + "," + jkv("via", jstr("cdp")) + "}"
@@ -1615,7 +1618,7 @@ func cmd_find(query, appfilter, maxdepth, maxnodes) (out, code) {
 	out = ""
 	if wantExpand && len(appfilter) == 0 {
 		code = EX_USAGE
-		out = errjson("bad_flags", "find --expand requires --app — sweeping every desktop application would scroll all of them", true, []string{"example: linux-use find \"Submit\" --app \"Microsoft Edge\" --expand"})
+		out = errjson(EX_USAGE, "bad_flags", "find --expand requires --app — sweeping every desktop application would scroll all of them", true, []string{"example: linux-use find \"Submit\" --app \"Microsoft Edge\" --expand"})
 		return
 	}
 	wantText = query
@@ -1722,18 +1725,18 @@ func getnode(ref) (node, out, code) {
 	appname, path, want := splitref(ref)
 	if len(appname) == 0 {
 		code = EX_USAGE
-		out = errjson("bad_ref", "ref must look like 'app:/0/1/2#fingerprint'", true, []string{"take refs verbatim from: linux-use state --app <app>"})
+		out = errjson(EX_USAGE, "bad_ref", "ref must look like 'app:/0/1/2#fingerprint'", true, []string{"take refs verbatim from: linux-use state --app <app>"})
 		return
 	}
 	app := findapp(appname)
 	if app == 0 {
 		if appAmbiguous > 1 {
 			code = EX_USAGE
-			out = errjson("app_ambiguous", str(appAmbiguous)+" applications are named '"+appname+"'", true, []string{"disambiguate with the pid: '" + appname + "#pid<PID>'", "list pids with: linux-use apps"})
+			out = errjson(EX_USAGE, "app_ambiguous", str(appAmbiguous)+" applications are named '"+appname+"'", true, []string{"disambiguate with the pid: '" + appname + "#pid<PID>'", "list pids with: linux-use apps"})
 			return
 		}
 		code = EX_APP_NOT_FOUND
-		out = errjson("app_not_found", "no application named '"+appname+"'", true, []string{"run: linux-use apps"})
+		out = errjson(EX_APP_NOT_FOUND, "app_not_found", "no application named '"+appname+"'", true, []string{"run: linux-use apps"})
 		return
 	}
 	if is_geom(path) {
@@ -1742,12 +1745,12 @@ func getnode(ref) (node, out, code) {
 		node = n2
 		if cnt == 0 {
 			code = EX_REF_NOT_FOUND
-			out = errjson("ref_not_found", "no widget of that role at that rectangle in "+appname, true, []string{"the UI moved or closed; re-run: linux-use state --app " + appname})
+			out = errjson(EX_REF_NOT_FOUND, "ref_not_found", "no widget of that role at that rectangle in "+appname, true, []string{"the UI moved or closed; re-run: linux-use state --app " + appname})
 			return
 		}
 		if cnt > 1 {
 			code = EX_REF_STALE
-			out = errjson("ref_ambiguous", str(cnt)+" widgets share that role and rectangle in "+appname, true, []string{"the layout changed; re-run: linux-use state --app " + appname})
+			out = errjson(EX_REF_STALE, "ref_ambiguous", str(cnt)+" widgets share that role and rectangle in "+appname, true, []string{"the layout changed; re-run: linux-use state --app " + appname})
 			return
 		}
 	} else {
@@ -1755,7 +1758,7 @@ func getnode(ref) (node, out, code) {
 		g_object_unref(app)
 		if node == 0 {
 			code = EX_REF_NOT_FOUND
-			out = errjson("ref_not_found", "path '"+path+"' does not exist in "+appname, true, []string{"the UI changed; re-run: linux-use state --app " + appname})
+			out = errjson(EX_REF_NOT_FOUND, "ref_not_found", "path '"+path+"' does not exist in "+appname, true, []string{"the UI changed; re-run: linux-use state --app " + appname})
 			return
 		}
 	}
@@ -1765,7 +1768,7 @@ func getnode(ref) (node, out, code) {
 			g_object_unref(node)
 			node = 0
 			code = EX_REF_STALE
-			out = errjson("ref_stale", "ref points at a different widget than when it was captured", true, []string{"the UI changed; re-run: linux-use state --app " + appname, "then use the fresh ref"})
+			out = errjson(EX_REF_STALE, "ref_stale", "ref points at a different widget than when it was captured", true, []string{"the UI changed; re-run: linux-use state --app " + appname, "then use the fresh ref"})
 			return
 		}
 	}
@@ -1786,7 +1789,7 @@ func cmd_act(ref, which) (out, code) {
 	if ai == 0 {
 		g_object_unref(node)
 		code = EX_NO_CAPABILITY
-		out = errjson("no_action", "'"+role+"' exposes no accessible action", true, []string{"use: linux-use click " + ref + " (synthetic pointer fallback)"})
+		out = errjson(EX_NO_CAPABILITY, "no_action", "'"+role+"' exposes no accessible action", true, []string{"use: linux-use click " + ref + " (synthetic pointer fallback)"})
 		return
 	}
 	nacts := atspi_action_get_n_actions(ai, 0)
@@ -1798,7 +1801,7 @@ func cmd_act(ref, which) (out, code) {
 		g_object_unref(ai)
 		g_object_unref(node)
 		code = EX_USAGE
-		out = errjson("bad_action_index", "action "+str(idx)+" out of range (element has "+str(nacts)+")", true, []string{"omit --action to use action 0"})
+		out = errjson(EX_USAGE, "bad_action_index", "action "+str(idx)+" out of range (element has "+str(nacts)+")", true, []string{"omit --action to use action 0"})
 		return
 	}
 	an := takestr(atspi_action_get_action_name(ai, idx, 0))
@@ -1807,7 +1810,7 @@ func cmd_act(ref, which) (out, code) {
 	g_object_unref(node)
 	if !ok {
 		code = EX_ACTION_FAILED
-		out = errjson("action_failed", "the toolkit refused action '"+an+"'", true, []string{"use: linux-use click " + ref})
+		out = errjson(EX_ACTION_FAILED, "action_failed", "the toolkit refused action '"+an+"'", true, []string{"use: linux-use click " + ref})
 		return
 	}
 	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("ref", jstr(ref)) + "," + jkv("role", jstr(role)) + "," + jkv("name", jstr(name)) + "," + jkv("action", jstr(an)) + "}"
@@ -1853,7 +1856,7 @@ func cmd_type(ref, text, replace, allowpw) (out, code) {
 	if role == "password text" && !allowpw {
 		g_object_unref(node)
 		code = EX_REFUSED
-		out = errjson("refused_password_field", "refusing to type into a password field", false, []string{"pass --allow-password if this is genuinely intended"})
+		out = errjson(EX_REFUSED, "refused_password_field", "refusing to type into a password field", false, []string{"pass --allow-password if this is genuinely intended"})
 		return
 	}
 	method := ""
@@ -1892,7 +1895,7 @@ func cmd_type(ref, text, replace, allowpw) (out, code) {
 		if !hasstate(node, ST_FOCUSED) {
 			g_object_unref(node)
 			code = EX_NO_CAPABILITY
-			out = errjson("focus_refused", "could not focus '"+role+"', so typing would go somewhere unknown", true, []string{"click it first: linux-use click " + ref, "then verify focused:true in: linux-use state --app <app>", "then: linux-use sendtext '<text>'"})
+			out = errjson(EX_NO_CAPABILITY, "focus_refused", "could not focus '"+role+"', so typing would go somewhere unknown", true, []string{"click it first: linux-use click " + ref, "then verify focused:true in: linux-use state --app <app>", "then: linux-use sendtext '<text>'"})
 			return
 		}
 		// Focus is verified, so prefer the clipboard route: AT-SPI key
@@ -1909,7 +1912,7 @@ func cmd_type(ref, text, replace, allowpw) (out, code) {
 	g_object_unref(node)
 	if !ok {
 		code = EX_ACTION_FAILED
-		out = errjson("type_failed", "could not insert text into '"+role+"'", true, []string{"try: linux-use click " + ref + " then linux-use key <keys>"})
+		out = errjson(EX_ACTION_FAILED, "type_failed", "could not insert text into '"+role+"'", true, []string{"try: linux-use click " + ref + " then linux-use key <keys>"})
 		return
 	}
 	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("ref", jstr(ref)) + "," + jkv("method", jstr(method)) + "," + jkv("chars", str(len(text))) + "}"
@@ -2093,7 +2096,7 @@ func cmd_sendtext(text, via) (out, code) {
 	code = EX_OK
 	if len(text) == 0 {
 		code = EX_USAGE
-		out = errjson("missing_text", "sendtext needs a string", true, []string{"example: linux-use sendtext 'hello'"})
+		out = errjson(EX_USAGE, "missing_text", "sendtext needs a string", true, []string{"example: linux-use sendtext 'hello'"})
 		return
 	}
 	mech := via
@@ -2102,7 +2105,7 @@ func cmd_sendtext(text, via) (out, code) {
 	}
 	if mech != "auto" && mech != "clipboard" && mech != "atspi" {
 		code = EX_USAGE
-		out = errjson("bad_via", "--via takes auto|clipboard|atspi", true, []string{"omit --via for the safe default"})
+		out = errjson(EX_USAGE, "bad_via", "--via takes auto|clipboard|atspi", true, []string{"omit --via for the safe default"})
 		return
 	}
 	if mech == "auto" {
@@ -2116,13 +2119,13 @@ func cmd_sendtext(text, via) (out, code) {
 	if mech == "clipboard" {
 		if !has_xclip() {
 			code = EX_NO_CAPABILITY
-			out = errjson("xclip_missing", "--via clipboard needs xclip on PATH", true, []string{"sudo apt install xclip"})
+			out = errjson(EX_NO_CAPABILITY, "xclip_missing", "--via clipboard needs xclip on PATH", true, []string{"sudo apt install xclip"})
 			return
 		}
 		ok, restored := clip_paste(text, true)
 		if !ok {
 			code = EX_ACTION_FAILED
-			out = errjson("sendtext_failed", "clipboard paste failed", true, []string{"run: linux-use doctor"})
+			out = errjson(EX_ACTION_FAILED, "sendtext_failed", "clipboard paste failed", true, []string{"run: linux-use doctor"})
 			return
 		}
 		out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("chars", str(len(text))) + "," + jkv("method", jstr("clipboard+ctrl_v")) + "," + jkv("clipboard_restored", jbool(restored)) + "}"
@@ -2131,7 +2134,7 @@ func cmd_sendtext(text, via) (out, code) {
 	ok := atspi_generate_keyboard_event(0, text, KEY_STRING, 0)
 	if !ok {
 		code = EX_ACTION_FAILED
-		out = errjson("sendtext_failed", "the a11y registry refused to synthesize the string", true, []string{"check: linux-use doctor"})
+		out = errjson(EX_ACTION_FAILED, "sendtext_failed", "the a11y registry refused to synthesize the string", true, []string{"check: linux-use doctor"})
 		return
 	}
 	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("chars", str(len(text))) + "," + jkv("method", jstr("keyboard.string")) + "," + jkv("warning", jstr("AT-SPI key synthesis crashes a11y-forced Chromium")) + "}"
@@ -2201,18 +2204,18 @@ func cmd_paste(text, restore) (out, code) {
 	code = EX_OK
 	if len(text) == 0 {
 		code = EX_USAGE
-		out = errjson("missing_text", "paste needs a string", true, []string{"example: linux-use paste 'hello'"})
+		out = errjson(EX_USAGE, "missing_text", "paste needs a string", true, []string{"example: linux-use paste 'hello'"})
 		return
 	}
 	if !has_xclip() {
 		code = EX_NO_CAPABILITY
-		out = errjson("xclip_missing", "paste needs xclip on PATH", true, []string{"sudo apt install xclip", "or force the unsafe path: linux-use sendtext --via atspi '<text>'"})
+		out = errjson(EX_NO_CAPABILITY, "xclip_missing", "paste needs xclip on PATH", true, []string{"sudo apt install xclip", "or force the unsafe path: linux-use sendtext --via atspi '<text>'"})
 		return
 	}
 	ok, restored := clip_paste(text, restore)
 	if !ok {
 		code = EX_ACTION_FAILED
-		out = errjson("paste_failed", "could not set the clipboard or send ctrl+v", true, []string{"run: linux-use doctor"})
+		out = errjson(EX_ACTION_FAILED, "paste_failed", "could not set the clipboard or send ctrl+v", true, []string{"run: linux-use doctor"})
 		return
 	}
 	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("chars", str(len(text))) + "," + jkv("method", jstr("clipboard+ctrl_v")) + "," + jkv("clipboard_restored", jbool(restored)) + "}"
@@ -2223,7 +2226,7 @@ func cmd_key(combo, dryrun) (out, code) {
 	dpy := xopen()
 	if dpy == 0 {
 		code = EX_NO_DISPLAY
-		out = errjson("no_display", "cannot open X display '"+env("DISPLAY")+"'", false, []string{"this build injects input via XTEST and needs an X11 session", "run: linux-use doctor"})
+		out = errjson(EX_NO_DISPLAY, "no_display", "cannot open X display '"+env("DISPLAY")+"'", false, []string{"this build injects input via XTEST and needs an X11 session", "run: linux-use doctor"})
 		return
 	}
 	toks := split(combo, "+")
@@ -2237,14 +2240,14 @@ func cmd_key(combo, dryrun) (out, code) {
 			if ks == 0 {
 				XCloseDisplay(dpy)
 				code = EX_USAGE
-				out = errjson("unknown_key", "'"+t+"' is not a known key name", true, []string{"keysym names are CASE-SENSITIVE: F4 not f4 (f1-f12 are accepted either way)", "aliases: ctrl shift alt super enter esc tab space backspace delete insert up down left right home end pageup pagedown print menu pause", "list every valid name with: xmodmap -pke"})
+				out = errjson(EX_USAGE, "unknown_key", "'"+t+"' is not a known key name", true, []string{"keysym names are CASE-SENSITIVE: F4 not f4 (f1-f12 are accepted either way)", "aliases: ctrl shift alt super enter esc tab space backspace delete insert up down left right home end pageup pagedown print menu pause", "list every valid name with: xmodmap -pke"})
 				return
 			}
 			kc := XKeysymToKeycode(dpy, ks)
 			if kc == 0 {
 				XCloseDisplay(dpy)
 				code = EX_USAGE
-				out = errjson("unmapped_key", "'"+nm+"' has no keycode in the current layout", true, []string{"the active keyboard layout cannot produce this key"})
+				out = errjson(EX_USAGE, "unmapped_key", "'"+nm+"' has no keycode in the current layout", true, []string{"the active keyboard layout cannot produce this key"})
 				return
 			}
 			codes = append(codes, kc)
@@ -2255,7 +2258,7 @@ func cmd_key(combo, dryrun) (out, code) {
 	if len(codes) == 0 {
 		XCloseDisplay(dpy)
 		code = EX_USAGE
-		out = errjson("empty_combo", "no keys given", true, []string{"example: linux-use key ctrl+shift+t"})
+		out = errjson(EX_USAGE, "empty_combo", "no keys given", true, []string{"example: linux-use key ctrl+shift+t"})
 		return
 	}
 	if dryrun {
@@ -2322,7 +2325,7 @@ func cmd_click(ref, px, py, button) (out, code) {
 		g_object_unref(node)
 		if w <= 0 || h <= 0 {
 			code = EX_NO_CAPABILITY
-			out = errjson("no_extents", "element has no on-screen geometry to click", true, []string{"use: linux-use act " + ref})
+			out = errjson(EX_NO_CAPABILITY, "no_extents", "element has no on-screen geometry to click", true, []string{"use: linux-use act " + ref})
 			return
 		}
 		x = ex + w/2
@@ -2331,7 +2334,7 @@ func cmd_click(ref, px, py, button) (out, code) {
 	}
 	if !clickxy(x, y, button) {
 		code = EX_NO_DISPLAY
-		out = errjson("no_display", "cannot open X display", false, []string{"run: linux-use doctor"})
+		out = errjson(EX_NO_DISPLAY, "no_display", "cannot open X display", false, []string{"run: linux-use doctor"})
 		return
 	}
 	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("target", jstr(label)) + "," + jkv("x", str(x)) + "," + jkv("y", str(y)) + "," + jkv("button", str(button)) + "}"
@@ -2356,7 +2359,7 @@ func cmd_launch(command, waitfor, timeoutms) (out, code) {
 		}
 		if !appeared {
 			code = EX_APP_NOT_FOUND
-			out = errjson("launch_timeout", "'"+waitfor+"' did not appear in the accessibility tree within "+str(timeoutms)+"ms", true, []string{"the app may be slow to start, or may not export accessibility", "run: linux-use apps"})
+			out = errjson(EX_APP_NOT_FOUND, "launch_timeout", "'"+waitfor+"' did not appear in the accessibility tree within "+str(timeoutms)+"ms", true, []string{"the app may be slow to start, or may not export accessibility", "run: linux-use apps"})
 			return
 		}
 	}
@@ -2447,7 +2450,7 @@ func cmd_pointer() (out, code) {
 	dpy := xopen()
 	if dpy == 0 {
 		code = EX_NO_DISPLAY
-		out = errjson("no_display", "cannot open X display", false, []string{"run: linux-use doctor"})
+		out = errjson(EX_NO_DISPLAY, "no_display", "cannot open X display", false, []string{"run: linux-use doctor"})
 		return
 	}
 	root := XDefaultRootWindow(dpy)
@@ -2747,7 +2750,7 @@ func cmd_watch(appfilter, rolefilter, evspec, maxev, duration, maxrss) (out, cod
 	lst := atspi_event_listener_new(func(ev, data) { on_event(ev, data) }, 0, 0)
 	if lst == 0 {
 		code = EX_NO_A11Y
-		out = errjson("watch_unavailable", "could not create an AT-SPI event listener", false, []string{"run: linux-use doctor"})
+		out = errjson(EX_NO_A11Y, "watch_unavailable", "could not create an AT-SPI event listener", false, []string{"run: linux-use doctor"})
 		return
 	}
 	reg := []string{}
@@ -2765,7 +2768,7 @@ func cmd_watch(appfilter, rolefilter, evspec, maxev, duration, maxrss) (out, cod
 	}
 	if len(reg) == 0 {
 		code = EX_USAGE
-		out = errjson("no_events_registered", "none of the requested event types could be registered", true, []string{"omit --events for the default set"})
+		out = errjson(EX_USAGE, "no_events_registered", "none of the requested event types could be registered", true, []string{"omit --events for the default set"})
 		return
 	}
 	// Banner on stderr so stdout stays pure NDJSON.
@@ -2784,20 +2787,20 @@ func cmd_watch(appfilter, rolefilter, evspec, maxev, duration, maxrss) (out, cod
 
 func guide_json() (r) {
 	c := []string{}
-	c = append(c, jkv("tool", jstr("linux-use")))
+	c = append(c, jkv("linux-use", jstr("Control a Linux desktop GUI at the accessibility layer — read widget trees, act on widgets, no screenshots or pixel coordinates needed.")))
 	c = append(c, jkv("version", jstr(VERSION)))
 	c = append(c, jkv("schema", jstr(SCHEMA)))
-	c = append(c, jkv("purpose", jstr("Control a Linux desktop GUI at the accessibility layer. Perception and actuation only — there is no LLM inside; you are the loop.")))
+	c = append(c, jkv("one_liner", jstr("linux-use reads the AT-SPI2 accessibility tree every GUI app publishes and acts on named widgets — perception and actuation only. There is no LLM inside; you are the loop.")))
 
 	m := []string{}
-	m = append(m, jstr("Every GUI app publishes a tree of widgets over AT-SPI2. linux-use reads that tree and acts on it. You do NOT need screenshots or pixel coordinates for most work."))
-	m = append(m, jstr("An element ref looks like 'gnome-calculator:/0/1/0/3#824713' — application name, child-index path, and a fingerprint of role+name. Pass refs back verbatim; never construct or edit one by hand."))
-	m = append(m, jstr("Two applications can publish the SAME accessible name (two browser profiles both called \"Microsoft Edge\"). A plain --app matching more than one is REFUSED with app_ambiguous rather than picking one; disambiguate with --app 'Name#pid1234' or --pid 1234. 'linux-use apps' lists each pid and flags ambiguous_names."))
-	m = append(m, jstr("A ref comes in two kinds, and ref_kind says which. A PATH ref (app:/0/1/2#fp) addresses a node by child indices. A GEOMETRY ref (app:@<roleId>~x,y,w,h#fp) addresses it by role and on-screen rectangle, and is issued when a node has no provable path — some toolkits report a parent that does not list the node among its children, so climbing to it is impossible, not merely unknown. Both are used identically: pass them back verbatim."))
-	m = append(m, jstr("A geometry ref is tied to screen position, so moving or resizing the window invalidates it — you get exit 84, never a silent hit on the wrong widget. If two widgets share a role and rectangle the ref is refused as ambiguous rather than guessed."))
-	m = append(m, jstr("Refs go stale when the UI changes. That is DETECTED, not silently ignored: you get exit 83 ref_stale. The fix is always to re-run 'state' and use fresh refs."))
-	m = append(m, jstr("Prefer 'act' over 'click'. 'act' invokes the widget's own accessible action — it needs no focus, no pointer, and works even when the window is fully occluded by another window. 'click' synthesizes a real pointer event and is the fallback for widgets that expose no action."))
-	c = append(c, jkv("mental_model", jarr(m)))
+	m = append(m, jkv("tree", jstr("Every GUI app publishes a tree of widgets over AT-SPI2. linux-use reads that tree and acts on it. You do NOT need screenshots or pixel coordinates for most work.")))
+	m = append(m, jkv("ref", jstr("An element ref looks like 'gnome-calculator:/0/1/0/3#824713' — application name, child-index path, and a fingerprint of role+name. Pass refs back verbatim; never construct or edit one by hand.")))
+	m = append(m, jkv("ambiguity", jstr("Two applications can publish the SAME accessible name (two browser profiles both called \"Microsoft Edge\"). A plain --app matching more than one is REFUSED with app_ambiguous rather than picking one; disambiguate with --app 'Name#pid1234' or --pid 1234. 'linux-use apps' lists each pid and flags ambiguous_names.")))
+	m = append(m, jkv("ref_kinds", jstr("A ref comes in two kinds, and ref_kind says which. A PATH ref (app:/0/1/2#fp) addresses a node by child indices. A GEOMETRY ref (app:@<roleId>~x,y,w,h#fp) addresses it by role and on-screen rectangle, and is issued when a node has no provable path — some toolkits report a parent that does not list the node among its children, so climbing to it is impossible, not merely unknown. Both are used identically: pass them back verbatim.")))
+	m = append(m, jkv("geometry_refs", jstr("A geometry ref is tied to screen position, so moving or resizing the window invalidates it — you get exit 84, never a silent hit on the wrong widget. If two widgets share a role and rectangle the ref is refused as ambiguous rather than guessed.")))
+	m = append(m, jkv("staleness", jstr("Refs go stale when the UI changes. That is DETECTED, not silently ignored: you get exit 83 ref_stale. The fix is always to re-run 'state' and use fresh refs.")))
+	m = append(m, jkv("actuation", jstr("Prefer 'act' over 'click'. 'act' invokes the widget's own accessible action — it needs no focus, no pointer, and works even when the window is fully occluded by another window. 'click' synthesizes a real pointer event and is the fallback for widgets that expose no action.")))
+	c = append(c, jkv("model", "{" + join(m, ",") + "}"))
 
 	l := []string{}
 	l = append(l, jstr("1. linux-use apps            — what is running and exposes accessibility"))
@@ -2806,6 +2809,33 @@ func guide_json() (r) {
 	l = append(l, jstr("4. linux-use read <ref> or state again — VERIFY the effect before the next step"))
 	l = append(l, jstr("Instead of polling step 4 in a sleep loop, run: linux-use watch --app X --duration 5000 (NDJSON, one event per line). Use --max-events N to stop after exactly N."))
 	c = append(c, jkv("loop", jarr(l)))
+
+	k := []string{}
+	k = append(k, jkv("ref", jstr("a widget address: app:path#fingerprint or app:@role~x,y,w,h#fingerprint. Opaque — pass verbatim.")))
+	k = append(k, jkv("fingerprint", jstr("hash of role+name inside a ref. A changed name makes the ref stale on purpose: the staleness IS the change signal.")))
+	k = append(k, jkv("ref_kind", jstr("path | geometry — geometry refs die when the window moves; path refs die when the tree reshapes. Both are detected, never guessed.")))
+	k = append(k, jkv("act", jstr("the widget's own accessible action — works with no focus and no pointer, even fully occluded. Always prefer it over click.")))
+	k = append(k, jkv("collection", jstr("server-side AT-SPI match query: one D-Bus round trip for all matching nodes. state/find use it when a --role filter is set; method reports which ran.")))
+	k = append(k, jkv("expand", jstr("scroll-driven realization: asks the app to materialize below-fold nodes, merges passes by ref path, scrolls back. --expand on state/find.")))
+	k = append(k, jkv("watch", jstr("NDJSON event stream over AT-SPI (object:state-changed etc.) — block on UI change instead of polling.")))
+	k = append(k, jkv("daemon", jstr("a warm AT-SPI registry over loopback HTTP: /_health, /_shutdown, /v1/<command>/... — keeps the bus connection hot between invocations.")))
+	k = append(k, jkv("cdp", jstr("Chrome DevTools Protocol path (--via cdp): whole-DOM perception + real DOM clicks for dedicated-profile browsers launched with --remote-debugging-port. Never on the live profile.")))
+	c = append(c, jkv("concepts", "{" + join(k, ",") + "}"))
+
+	cd := []string{}
+	cd = append(cd, jkv("perceive", jarr([]string{jstr("linux-use apps"), jstr("linux-use windows [--app X]"), jstr("linux-use state --app X [--role R] [--all] [--expand] [--via cdp] [--format lines]"), jstr("linux-use find <query> --app X [--role R] [--expand]"), jstr("linux-use read <ref>"), jstr("linux-use pointer")})))
+	cd = append(cd, jkv("act", jarr([]string{jstr("linux-use act <ref> [--action N]"), jstr("linux-use click <ref|--x N --y N> [--button B]"), jstr("linux-use type <ref> <text> [--replace] [--allow-password]"), jstr("linux-use paste <text>"), jstr("linux-use sendtext <text> [--via auto|clipboard|atspi]"), jstr("linux-use key <combo> [--dry-run]")})))
+	cd = append(cd, jkv("observe", jarr([]string{jstr("linux-use watch [--app X] [--role R] [--events T,...] [--max-events N] [--duration MS] [--max-rss KB]"), jstr("linux-use stats [--last N]")})))
+	cd = append(cd, jkv("lifecycle", jarr([]string{jstr("linux-use launch <command> [--wait-for APP] [--timeout MS]"), jstr("linux-use serve [--host H] [--port P]"), jstr("linux-use daemon start|stop|status [--host H] [--port P]")})))
+	cd = append(cd, jkv("meta", jarr([]string{jstr("linux-use guide [--human]"), jstr("linux-use help-json"), jstr("linux-use doctor"), jstr("linux-use roles"), jstr("linux-use version"), jstr("linux-use feedback <message>"), jstr("linux-use update [--check|--force]"), jstr("linux-use install|uninstall [--prefix D]"), jstr("linux-use telemetry [--off]")})))
+	c = append(c, jkv("commands", "{" + join(cd, ",") + "}"))
+
+	ex := []string{}
+	ex = append(ex, "{" + jkv("goal", jstr("press a button in a GTK app")) + "," + jkv("do", jarr([]string{jstr("linux-use apps"), jstr("linux-use state --app gnome-calculator"), jstr("linux-use act 'gnome-calculator:/0/1/0/3#824713'"), jstr("linux-use state --app gnome-calculator --format lines")})) + "}")
+	ex = append(ex, "{" + jkv("goal", jstr("fill a form field in a dedicated-profile browser")) + "," + jkv("do", jarr([]string{jstr("contrib/a11y-browser -n work https://example.com"), jstr("linux-use find 'Email' --app 'Microsoft Edge'"), jstr("linux-use type '<ref>' 'me@example.com'"), jstr("linux-use act '<submit ref>'")})) + "}")
+	ex = append(ex, "{" + jkv("goal", jstr("wait for a UI change instead of polling")) + "," + jkv("do", jarr([]string{jstr("linux-use watch --app gedit --max-events 1 --duration 10000")})) + "}")
+	ex = append(ex, "{" + jkv("goal", jstr("keep the a11y registry warm across many invocations")) + "," + jkv("do", jarr([]string{jstr("linux-use daemon start"), jstr("curl -s localhost:7777/_health"), jstr("curl -s localhost:7777/v1/state/--app/gedit"), jstr("linux-use daemon stop")})) + "}")
+	c = append(c, jkv("examples", jarr(ex)))
 
 	g := []string{}
 	g = append(g, jstr("SHOWING does not mean visible. An element can be SHOWING while completely hidden behind another window. Never tell a user 'you can see X' based on this tool."))
@@ -2840,8 +2870,13 @@ func guide_json() (r) {
 	c = append(c, jkv("output_contract", jarr(o)))
 
 	d := []string{}
-	d = append(d, jstr("Each invocation connects to the AT-SPI bus from cold. For repeated calls run 'linux-use daemon start' and the registry stays warm."))
+	d = append(d, jstr("Each invocation connects to the AT-SPI bus from cold. For repeated calls run 'linux-use daemon start' and the registry stays warm. 'serve' binds 127.0.0.1 by default — a wider bind needs an explicit --host, and /_shutdown becomes bearer-token gated (token in ~/.linux-use/shutdown.token)."))
 	c = append(c, jkv("daemon", jarr(d)))
+
+	t := []string{}
+	t = append(t, jstr("linux-use sends anonymous usage counts: tool, version, os/arch, which verb ran, exit-class. No identity, arguments or data — one allow-listed POST per run, detached, silent on failure."))
+	t = append(t, jstr("Inspect the exact payload with 'linux-use telemetry'. Disable: LINUX_USE_TELEMETRY=0, DO_NOT_TRACK=1, or 'linux-use telemetry --off'. Off by default in CI. Endpoint override: LINUX_USE_TELEMETRY_URL."))
+	c = append(c, jkv("telemetry", jarr(t)))
 
 	r = "{" + join(c, ",") + "}"
 }
@@ -2891,23 +2926,83 @@ func helpjson() (r) {
 	cmds = append(cmds, "{"+jkv("name", jstr("pointer"))+","+jkv("args", jarr([]string{}))+","+jkv("summary", jstr("current pointer position"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("roles"))+","+jkv("args", jarr([]string{}))+","+jkv("summary", jstr("every valid --role name, with which are interactive by default"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("doctor"))+","+jkv("args", jarr([]string{}))+","+jkv("summary", jstr("environment health: session type, a11y bus, XTEST"))+"}")
-	cmds = append(cmds, "{"+jkv("name", jstr("serve"))+","+jkv("args", jarr([]string{jstr("--port")}))+","+jkv("summary", jstr("run the warm-registry HTTP daemon in the foreground"))+"}")
-	cmds = append(cmds, "{"+jkv("name", jstr("daemon"))+","+jkv("args", jarr([]string{jstr("start|stop|status"), jstr("--port")}))+","+jkv("summary", jstr("manage the background daemon"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("serve"))+","+jkv("args", jarr([]string{jstr("--host"), jstr("--port")}))+","+jkv("summary", jstr("run the warm-registry HTTP daemon in the foreground; binds 127.0.0.1 by default"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("daemon"))+","+jkv("args", jarr([]string{jstr("start|stop|status"), jstr("--host"), jstr("--port")}))+","+jkv("summary", jstr("manage the background daemon — idempotent, health-probed"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("guide"))+","+jkv("args", jarr([]string{jstr("--human")}))+","+jkv("summary", jstr("the full operator manual"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("feedback"))+","+jkv("args", jarr([]string{jstr("<message>"), jstr("--kind"), jstr("--context")}))+","+jkv("summary", jstr("send feedback to the central relay — best-effort, never fails"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("update"))+","+jkv("args", jarr([]string{jstr("--check"), jstr("--force")}))+","+jkv("summary", jstr("content-hash self-update from the published binary"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("install"))+","+jkv("args", jarr([]string{jstr("--prefix")}))+","+jkv("summary", jstr("copy this binary onto PATH (default ~/.local/bin)"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("uninstall"))+","+jkv("args", jarr([]string{jstr("--prefix")}))+","+jkv("summary", jstr("remove the installed binary — no-op if absent"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("telemetry"))+","+jkv("args", jarr([]string{jstr("--off")}))+","+jkv("summary", jstr("print the exact anonymous-usage payload and on/off state"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("version"))+","+jkv("args", jarr([]string{}))+","+jkv("summary", jstr("version string"))+"}")
-	r = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("tool", jstr("linux-use")) + "," + jkv("version", jstr(VERSION)) + "," + jkv("commands", jarr(cmds)) + "}"
+	xc := []string{}
+	xc = append(xc, jkv("0", jstr("success")))
+	xc = append(xc, jkv("3", jstr("daemon status: daemon is stopped")))
+	xc = append(xc, jkv("5", jstr("update --check: update available")))
+	xc = append(xc, jkv("80", jstr("usage error: bad/missing arguments")))
+	xc = append(xc, jkv("81", jstr("no_a11y: cannot reach the AT-SPI bus")))
+	xc = append(xc, jkv("82", jstr("app_not_found")))
+	xc = append(xc, jkv("83", jstr("ref_stale: UI changed, re-run state")))
+	xc = append(xc, jkv("84", jstr("ref_not_found")))
+	xc = append(xc, jkv("85", jstr("no_capability (no accessible action, password field, no X display path)")))
+	xc = append(xc, jkv("86", jstr("action_failed: the toolkit refused")))
+	xc = append(xc, jkv("87", jstr("no_display: cannot open the X display")))
+	xc = append(xc, jkv("89", jstr("refused (safety refusal)")))
+	xc = append(xc, jkv("90", jstr("rss_limit (watch --max-rss) or permission denied")))
+	xc = append(xc, jkv("100", jstr("external/integration: download, daemon start, network")))
+	xc = append(xc, jkv("110", jstr("internal: daemon stop did not complete")))
+	envs := []string{}
+	envs = append(envs, jstr("LINUX_USE_HOST"))
+	envs = append(envs, jstr("LINUX_USE_PORT"))
+	envs = append(envs, jstr("LINUX_USE_SERVER"))
+	envs = append(envs, jstr("LINUX_USE_NO_NUDGE"))
+	envs = append(envs, jstr("LINUX_USE_TELEMETRY"))
+	envs = append(envs, jstr("LINUX_USE_TELEMETRY_URL"))
+	envs = append(envs, jstr("FEEDBACK_RELAY"))
+	envs = append(envs, jstr("DO_NOT_TRACK"))
+	envs = append(envs, jstr("DISPLAY"))
+	envs = append(envs, jstr("USER"))
+	r = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("tool", jstr("linux-use")) + "," + jkv("version", jstr(VERSION)) + "," + jkv("output", jstr("json")) + "," + jkv("commands", jarr(cmds)) + "," + jkv("exit_codes", "{" + join(xc, ",") + "}") + "," + jkv("env", jarr(envs)) + "," + jkv("see_also", jarr([]string{jstr("linux-use guide"), jstr("linux-use guide --human")})) + "}"
 }
 
 // ---------------------------------------------------------------- daemon
 
 var srv_port = 7777
+var shutdown_token = ""
+
+func state_dir() (d) {
+	home := env("HOME")
+	if len(home) == 0 {
+		home = "/tmp"
+	}
+	d = home + "/.linux-use"
+	mkdir(d)
+}
 
 func health_json() (r) {
 	napps := 0
 	if desktop != 0 {
 		napps = atspi_accessible_get_child_count(desktop, 0)
 	}
-	r = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("tool", jstr("linux-use")) + "," + jkv("version", jstr(VERSION)) + "," + jkv("warm", jbool(desktop != 0)) + "," + jkv("applications", str(napps)) + "," + jkv("port", str(srv_port)) + "}"
+	r = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("service", jstr("linux-use")) + "," + jkv("pid", str(getpid())) + "," + jkv("tool", jstr("linux-use")) + "," + jkv("version", jstr(VERSION)) + "," + jkv("warm", jbool(desktop != 0)) + "," + jkv("applications", str(napps)) + "," + jkv("port", str(srv_port)) + "}"
+}
+
+func delayed_exit() {
+	sleep(80)
+	exit(0)
+}
+
+func llms_txt() (r) {
+	ls := []string{}
+	ls = append(ls, "# linux-use — agent-first GUI control for Linux desktops")
+	ls = append(ls, "Reads the AT-SPI2 accessibility tree and acts on named widgets; no screenshots, no pixel coordinates, no LLM inside — the agent is the loop.")
+	ls = append(ls, "")
+	ls = append(ls, "GET /guide for the full operator manual (JSON). With the binary:")
+	ls = append(ls, "  linux-use guide")
+	ls = append(ls, "")
+	ls = append(ls, "Quick start: linux-use apps -> linux-use state --app <name> -> linux-use act <ref> -> re-run state to verify.")
+	ls = append(ls, "Drive it over HTTP here: GET /v1/<command>/<arg>/... (e.g. /v1/state/--app/gedit).")
+	r = join(ls, "\n")
 }
 
 func lu_route(req) (res) {
@@ -2915,15 +3010,29 @@ func lu_route(req) (res) {
 		res = ok_json(health_json())
 		return
 	}
+	if req.path == "/guide" {
+		res = ok_json(guide_json())
+		return
+	}
+	if req.path == "/llms.txt" {
+		res = response("200 OK", "text/plain; charset=utf-8", llms_txt())
+		return
+	}
 	if req.path == "/_shutdown" {
 		if req.method != "POST" {
-			res = response("405 Method Not Allowed", "application/json", errjson("method_not_allowed", "POST required", true, []string{"use POST /_shutdown"}))
+			res = response("405 Method Not Allowed", "application/json", errjson(EX_USAGE, "method_not_allowed", "POST required", true, []string{"use POST /_shutdown"}))
 			return
+		}
+		if len(shutdown_token) > 0 {
+			auth := header(req, "authorization")
+			if auth != "Bearer " + shutdown_token {
+				res = response("403 Forbidden", "application/json", errjson(EX_REFUSED, "forbidden", "POST /_shutdown requires a bearer token on a non-loopback bind", false, []string{"the token is in ~/.linux-use/shutdown.token on this machine"}))
+				return
+			}
 		}
 		write(2, "linux-use: shutdown requested\n")
 		res = ok_json("{" + jkv("ok", "true") + "," + jkv("stopping", "true") + "}")
-		flush()
-		exit(0)
+		go delayed_exit()
 		return
 	}
 	if has_prefix(req.path, "/v1/") {
@@ -2945,81 +3054,486 @@ func lu_route(req) (res) {
 		}
 		return
 	}
-	res = response("404 Not Found", "application/json", errjson("not_found", "no such endpoint", true, []string{"GET /_health", "POST /_shutdown", "GET /v1/<command>/<arg>/..."}))
+	res = response("404 Not Found", "application/json", errjson(EX_EXT, "not_found", "no such endpoint", true, []string{"GET /_health", "POST /_shutdown", "GET /guide", "GET /v1/<command>/<arg>/..."}))
 }
 
-func cmd_serve(port) (out, code) {
+func is_loopback(host) (b) {
+	b = host == "127.0.0.1" || host == "localhost" || host == "::1"
+}
+
+func cmd_serve(host, port) (out, code) {
 	code = EX_OK
 	out = ""
+	srv_port = port
 	if !a11y_up() {
 		write(2, "linux-use: WARNING starting without an AT-SPI connection\n")
 	}
-	write(2, "linux-use " + VERSION + " serving on 127.0.0.1:" + str(port) + " (warm registry)\n")
-	serve(port, func(req) { return lu_route(req) })
+	if !is_loopback(host) {
+		shutdown_token = to_hex(rand_bytes(16))
+		tf := state_dir() + "/shutdown.token"
+		write_file(tf, shutdown_token)
+		system("chmod 600 " + tf)
+		write(2, "[serve] non-loopback bind — /_shutdown requires the bearer token in " + tf + "\n")
+	}
+	write(2, "[serve] listening on http://" + host + ":" + str(port) + "\n")
+	flush()
+	// a long-running server sends at most one run event, at startup — never
+	// per-request (cli-telemetry-spec §4.4).
+	tel_send("run", "serve", 0)
+	serve_on_quiet(host, port, func(req) { return lu_route(req) })
 }
 
-func daemon_health(port) (up, body) {
-	st, b, e := http_get("http://127.0.0.1:" + str(port) + "/_health")
+func dial_host(host) (h) {
+	h = host
+	if host == "0.0.0.0" || host == "::" {
+		h = "127.0.0.1"
+	}
+}
+
+func daemon_health(host, port) (up, body) {
+	st, b, e := http_get("http://" + dial_host(host) + ":" + str(port) + "/_health")
 	up = st == 200 && len(e) == 0
 	body = b
 }
 
-func cmd_daemon(sub, port) (out, code) {
+func cmd_daemon(sub, host, port) (out, code) {
 	code = EX_OK
 	if sub == "status" {
-		up, body := daemon_health(port)
+		up, _ := daemon_health(host, port)
 		if up {
-			out = body
+			out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("daemon", jstr("running")) + "," + jkv("host", jstr(host)) + "," + jkv("port", str(port)) + "}"
 			return
 		}
-		out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "false") + "," + jkv("running", "false") + "," + jkv("port", str(port)) + "}"
+		out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("daemon", jstr("stopped")) + "}"
+		code = 3
 		return
 	}
 	if sub == "start" {
-		up, body := daemon_health(port)
+		up, _ := daemon_health(host, port)
 		if up {
-			out = body
+			out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("daemon", jstr("already_running")) + "," + jkv("host", jstr(host)) + "," + jkv("port", str(port)) + "}"
 			return
 		}
 		self := args()[0]
-		system(self + " serve --port " + str(port) + " >>/tmp/linux-use-daemon.log 2>&1 &")
+		logpath := "/tmp/linux-use-daemon.log"
+		system("setsid " + self + " serve --host " + host + " --port " + str(port) + " >>" + logpath + " 2>&1 < /dev/null &")
 		waited := 0
 		while waited < 5000 {
-			sleep(200)
-			waited = waited + 200
-			u2, b2 := daemon_health(port)
+			sleep(100)
+			waited = waited + 100
+			u2, _ := daemon_health(host, port)
 			if u2 {
-				out = b2
+				out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("daemon", jstr("started")) + "," + jkv("host", jstr(host)) + "," + jkv("port", str(port)) + "," + jkv("log", jstr(logpath)) + "}"
 				return
 			}
 		}
-		code = EX_DAEMON
-		out = errjson("daemon_start_failed", "daemon did not become healthy within 5s", true, []string{"check /tmp/linux-use-daemon.log", "try: linux-use serve --port " + str(port) + " (foreground)"})
+		code = EX_EXT
+		out = errjson(EX_EXT, "daemon_start_failed", "daemon did not become healthy within 5s (see " + logpath + ")", true, []string{"cat " + logpath, "try: linux-use serve --host " + host + " --port " + str(port) + " (foreground)"})
 		return
 	}
 	if sub == "stop" {
-		up, _ := daemon_health(port)
+		up, _ := daemon_health(host, port)
 		if !up {
-			out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("stopped", "true") + "," + jkv("was_running", "false") + "}"
+			out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("daemon", jstr("already_stopped")) + "}"
 			return
 		}
-		_, _, _ = http_request("POST", "http://127.0.0.1:"+str(port)+"/_shutdown", []string{}, "")
+		hdrs := []string{}
+		tok := trim(read_file(state_dir() + "/shutdown.token"))
+		if len(tok) > 0 {
+			hdrs = append(hdrs, "Authorization: Bearer " + tok)
+		}
+		_, _, _ = http_request("POST", "http://" + dial_host(host) + ":" + str(port) + "/_shutdown", hdrs, "")
 		waited := 0
-		while waited < 3000 {
-			sleep(200)
-			waited = waited + 200
-			u2, _ := daemon_health(port)
+		while waited < 5000 {
+			sleep(100)
+			waited = waited + 100
+			u2, _ := daemon_health(host, port)
 			if !u2 {
-				out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("stopped", "true") + "," + jkv("was_running", "true") + "}"
+				out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("daemon", jstr("stopped")) + "}"
 				return
 			}
 		}
-		code = EX_DAEMON
-		out = errjson("daemon_stop_failed", "daemon still healthy after shutdown request", true, []string{"kill it manually: pkill -f 'linux-use serve'"})
+		code = EX_INTERNAL
+		out = errjson(EX_INTERNAL, "daemon_stop_failed", "daemon still responding after its shutdown grace period", true, []string{"kill it manually: pkill -f 'linux-use serve'"})
 		return
 	}
 	code = EX_USAGE
-	out = errjson("bad_subcommand", "daemon takes start|stop|status", true, []string{"linux-use daemon status"})
+	out = errjson(EX_USAGE, "bad_subcommand", "daemon takes start|stop|status", true, []string{"linux-use daemon status"})
+}
+
+// ---------------------------------------------------------------- feedback (cli-feedback-spec)
+// Relay-only adoption: linux-use has no hosted feedback endpoint of its own,
+// so the submission goes straight to the central relay. Never fails the caller.
+
+func cmd_feedback(msg, kind, ctx) (out, code) {
+	code = EX_OK
+	if len(trim(msg)) == 0 {
+		code = EX_USAGE
+		out = errjson(EX_USAGE, "missing_message", "feedback needs a message", true, []string{"example: linux-use feedback \"the ref went stale too fast\""})
+		return
+	}
+	id := to_hex(rand_bytes(8))
+	reporter := env("USER")
+	if len(reporter) == 0 {
+		reporter = "agent"
+	}
+	body := "{" + jkv("message", jstr(msg)) + "," + jkv("app", jstr("linux-use")) + "," + jkv("version", jstr(VERSION)) + "," + jkv("kind", jstr(kind)) + "," + jkv("context", jstr(ctx)) + "," + jkv("reporter", jstr(reporter)) + "," + jkv("id", jstr(id)) + "}"
+	relayed := 0
+	relay := env("FEEDBACK_RELAY")
+	if len(relay) == 0 {
+		relay = "https://feedback.intrane.fr"
+	}
+	if relay != "off" {
+		resp := https_post(relay + "/v1/feedback", body)
+		if len(resp) > 0 {
+			relayed = 1
+		}
+	}
+	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("id", jstr(id)) + "," + jkv("stored", "0") + "," + jkv("relayed", str(relayed)) + "}"
+}
+
+// ---------------------------------------------------------------- telemetry (cli-telemetry-spec)
+// Anonymous, allow-listed usage counts. Off-switches are checked before any
+// network code; sends are detached and silent. `linux-use telemetry` prints
+// the real next payload.
+
+var telemetry_endpoint = "https://feedback.intrane.fr/v1/telemetry"
+var current_verb = ""
+
+func tel_enabled() (ok) {
+	ok = false
+	if env("DO_NOT_TRACK") == "1" {
+		return
+	}
+	t := env("LINUX_USE_TELEMETRY")
+	if t == "0" || t == "false" || t == "off" || t == "no" {
+		return
+	}
+	k, _, _ := stat(state_dir() + "/telemetry-off")
+	if k == 1 {
+		return
+	}
+	if len(env("CI")) > 0 || len(env("CONTINUOUS_INTEGRATION")) > 0 || len(env("GITHUB_ACTIONS")) > 0 || len(env("GITLAB_CI")) > 0 || len(env("BUILDKITE")) > 0 {
+		return
+	}
+	ok = true
+}
+
+func tel_notice() {
+	nf := state_dir() + "/telemetry-notice-shown"
+	k, _, _ := stat(nf)
+	if k == 1 {
+		return
+	}
+	write(2, "[telemetry] linux-use sends anonymous usage counts: tool, version,\n")
+	write(2, "[telemetry] os/arch, which verb ran, and whether it failed. No identity,\n")
+	write(2, "[telemetry] arguments or data. See `linux-use telemetry` for the exact payload.\n")
+	write(2, "[telemetry] Disable: LINUX_USE_TELEMETRY=0 (or DO_NOT_TRACK=1)\n")
+	write_file(nf, "1")
+}
+
+func tel_payload(event, verb, exit_class) (p) {
+	_, osr, _ := exec("uname -s")
+	_, arr, _ := exec("uname -m")
+	p = "{" + jkv("tool", jstr("linux-use")) + "," + jkv("version", jstr(VERSION)) + "," + jkv("event", jstr(event)) + "," + jkv("verb", jstr(verb)) + "," + jkv("os", jstr(to_lower(trim(osr)))) + "," + jkv("arch", jstr(trim(arr))) + "," + jkv("exit_class", str(exit_class)) + "," + jkv("ts", jstr(time_format_utc(now(), "%Y-%m-%dT%H:%M:%SZ"))) + "}"
+}
+
+func tel_send(event, verb, exit_class) {
+	if !tel_enabled() {
+		return
+	}
+	tel_notice()
+	ik, _, _ := stat(state_dir() + "/telemetry-install-sent")
+	actual := event
+	if ik != 1 {
+		actual = "install"
+		write_file(state_dir() + "/telemetry-install-sent", "1")
+	}
+	tmp := "/tmp/linux-use-tel-" + to_hex(rand_bytes(4)) + ".json"
+	write_file(tmp, tel_payload(actual, verb, exit_class))
+	ep := env("LINUX_USE_TELEMETRY_URL")
+	if len(ep) == 0 {
+		ep = telemetry_endpoint
+	}
+	system("(curl -s -m 2 -X POST " + ep + " -H 'content-type: application/json' --data-binary @" + tmp + " >/dev/null 2>&1; rm -f " + tmp + ") >/dev/null 2>&1 &")
+}
+
+func tel_exit_class(code) (c) {
+	c = 0
+	if code >= 80 && code < 90 {
+		c = 80
+	}
+	if code >= 90 && code < 100 {
+		c = 90
+	}
+	if code >= 100 && code < 110 {
+		c = 100
+	}
+	if code >= 110 {
+		c = 110
+	}
+}
+
+func tel_finish(code) {
+	if !tel_enabled() {
+		return
+	}
+	if code == 0 || code == 3 || code == 5 {
+		tel_send("run", current_verb, tel_exit_class(code))
+		return
+	}
+	tel_send("error", current_verb, tel_exit_class(code))
+}
+
+func tel_why_disabled() (r) {
+	if env("DO_NOT_TRACK") == "1" {
+		r = "DO_NOT_TRACK=1"
+		return
+	}
+	t := env("LINUX_USE_TELEMETRY")
+	if t == "0" || t == "false" || t == "off" || t == "no" {
+		r = "LINUX_USE_TELEMETRY=" + t
+		return
+	}
+	k, _, _ := stat(state_dir() + "/telemetry-off")
+	if k == 1 {
+		r = "disabled by config (linux-use telemetry --off)"
+		return
+	}
+	if len(env("CI")) > 0 || len(env("CONTINUOUS_INTEGRATION")) > 0 || len(env("GITHUB_ACTIONS")) > 0 || len(env("GITLAB_CI")) > 0 || len(env("BUILDKITE")) > 0 {
+		r = "CI detected"
+		return
+	}
+	r = "unknown"
+}
+
+func cmd_telemetry(off) (out, code) {
+	code = EX_OK
+	if off {
+		write_file(state_dir() + "/telemetry-off", "1")
+		out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("data", "{" + jkv("enabled", "false") + "," + jkv("reason", jstr("disabled by config")) + "}") + "}"
+		return
+	}
+	en := tel_enabled()
+	ep := env("LINUX_USE_TELEMETRY_URL")
+	if len(ep) == 0 {
+		ep = telemetry_endpoint
+	}
+	nk, _, _ := stat(state_dir() + "/telemetry-notice-shown")
+	reason := "enabled"
+	ens := "true"
+	if !en {
+		reason = tel_why_disabled()
+		ens = "false"
+	}
+	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("data", "{" + jkv("enabled", ens) + "," + jkv("reason", jstr(reason)) + "," + jkv("endpoint", jstr(ep)) + "," + jkv("next_payload", tel_payload("run", "telemetry", 0)) + "," + jkv("disable", jstr("LINUX_USE_TELEMETRY=0")) + "," + jkv("notice_shown", jbool(nk == 1)) + "}") + "}"
+}
+
+// ---------------------------------------------------------------- update (cli-update-spec)
+// Content-hash self-update: the server is the GitHub Pages docs site serving
+// version.json ({ok,version,download,sha256}); the artifact lives on GitHub
+// Releases. verify sha256[:12] -> smoke test -> atomic swap with .bak.
+
+var update_server = "https://javimosch.github.io/linux-use"
+
+func bin_self() (p) {
+	p = args()[0]
+	_, abs, _ := exec("readlink -f " + p)
+	abs = trim(abs)
+	if len(abs) > 0 {
+		p = abs
+	}
+}
+
+func dirname(p) (d) {
+	d = "."
+	i := len(p) - 1
+	while i >= 0 {
+		if substr(p, i, i+1) == "/" {
+			break
+		}
+		i = i - 1
+	}
+	if i < 0 {
+		d = "."
+		return
+	}
+	if i == 0 {
+		d = "/"
+		return
+	}
+	d = substr(p, 0, i)
+}
+
+func local_version(bin) (v) {
+	vf := dirname(bin) + "/VERSION"
+	_, vs, _ := stat(vf)
+	if vs > 0 {
+		v = trim(read_file(vf))
+		if len(v) > 0 {
+			return
+		}
+	}
+	b := read_file_bytes(bin)
+	if len(b) == 0 {
+		v = ""
+		return
+	}
+	v = substr(to_hex(sha256_bytes(b)), 0, 12)
+}
+
+func strip_quotes(s) (r) {
+	r = s
+	if len(s) >= 2 && substr(s, 0, 1) == "\"" && substr(s, len(s)-1, len(s)) == "\"" {
+		r = substr(s, 1, len(s)-1)
+	}
+}
+
+func update_base() (b) {
+	b = env("LINUX_USE_SERVER")
+	if len(b) == 0 {
+		b = update_server
+	}
+}
+
+func cmd_update(check, force) (out, code) {
+	code = EX_OK
+	bin := bin_self()
+	lv := local_version(bin)
+	status, body, e := http_get(update_base() + "/version.json")
+	if len(e) > 0 || status != 200 {
+		code = EX_EXT
+		out = errjson(EX_EXT, "update_unreachable", "cannot fetch " + update_base() + "/version.json (status=" + str(status) + " err=" + e + ")", true, []string{"check network connectivity", "check: curl -sI " + update_base() + "/version.json"})
+		return
+	}
+	rv, verr := json_get(body, ".version")
+	dl, derr := json_get(body, ".download")
+	fs2, _ := json_get(body, ".sha256")
+	if len(verr) > 0 || len(derr) > 0 {
+		code = EX_EXT
+		out = errjson(EX_EXT, "version_parse_failed", "version.json is missing .version or .download", true, []string{"report it: linux-use feedback \"version.json broken\""})
+		return
+	}
+	rv = strip_quotes(rv)
+	dl = strip_quotes(dl)
+	fs2 = strip_quotes(fs2)
+	if lv == rv && !force {
+		out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("updated", "false") + "," + jkv("version", jstr(rv)) + "," + jkv("up_to_date", "true") + "}"
+		return
+	}
+	if check {
+		out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("updated", "false") + "," + jkv("local", jstr(lv)) + "," + jkv("remote", jstr(rv)) + "," + jkv("up_to_date", "false") + "}"
+		code = 5
+		return
+	}
+	tmp := "/tmp/linux-use-update-" + to_hex(rand_bytes(4))
+	newbin := tmp + "/linux-use"
+	durl := dl
+	if has_prefix(durl, "/") {
+		durl = update_base() + durl
+	}
+	write(2, "[update] downloading " + durl + "\n")
+	dc, _, dle := exec("curl -sS -L -f -o " + newbin + " " + durl)
+	if dc != 0 {
+		code = EX_EXT
+		out = errjson(EX_EXT, "download_failed", "download failed: " + trim(dle), true, []string{"check network connectivity", "retry: linux-use update"})
+		return
+	}
+	nb := read_file_bytes(newbin)
+	if len(nb) == 0 {
+		code = EX_EXT
+		out = errjson(EX_EXT, "download_empty", "downloaded artifact is empty", true, []string{"retry: linux-use update"})
+		return
+	}
+	dh := to_hex(sha256_bytes(nb))
+	if substr(dh, 0, 12) != rv || (len(fs2) > 0 && dh != fs2) {
+		remove(newbin)
+		code = EX_EXT
+		out = errjson(EX_EXT, "verification_failed", "downloaded hash does not match the advertised version " + rv, true, []string{"a partial publish can cause this — retry: linux-use update"})
+		return
+	}
+	system("chmod +x " + newbin)
+	sc, so, _ := exec(newbin + " version")
+	if sc != 0 {
+		code = EX_EXT
+		out = errjson(EX_EXT, "smoke_test_failed", "new binary failed the `version` smoke test", true, []string{"the download is self-consistent but broken — report it: linux-use feedback \"update smoke test failed\""})
+		return
+	}
+	_ = so
+	bak := bin + ".bak"
+	system("mv " + bin + " " + bak + " 2>/dev/null")
+	mc, _, mv_err := exec("mv " + newbin + " " + bin)
+	if mc != 0 {
+		system("mv " + bak + " " + bin + " 2>/dev/null")
+		code = EX_EXT
+		out = errjson(EX_EXT, "swap_failed", "cannot move the new binary into place: " + trim(mv_err), true, []string{"check filesystem permissions on " + bin})
+		return
+	}
+	system("chmod +x " + bin)
+	write_file(dirname(bin) + "/VERSION", rv)
+	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("updated", "true") + "," + jkv("from", jstr(lv)) + "," + jkv("to", jstr(rv)) + "," + jkv("bak", jstr(bak)) + "}"
+}
+
+// version_nudge (cli-update-spec §4): at most once/hour, stderr only, silent
+// on failure, never auto-updates.
+func version_nudge() {
+	if env("LINUX_USE_NO_NUDGE") == "1" || env("DO_NOT_TRACK") == "1" {
+		return
+	}
+	if len(env("CI")) > 0 || len(env("GITHUB_ACTIONS")) > 0 || len(env("GITLAB_CI")) > 0 || len(env("BUILDKITE")) > 0 {
+		return
+	}
+	cf := state_dir() + "/version-cache"
+	_, _, last := stat(cf)
+	if last > 0 && now() - last < 3600 {
+		return
+	}
+	write_file(cf, str(now()))
+	status, body, e := http_get(update_base() + "/version.json")
+	if len(e) > 0 || status != 200 {
+		return
+	}
+	rv, verr := json_get(body, ".version")
+	if len(verr) > 0 {
+		return
+	}
+	rv = strip_quotes(rv)
+	lv := local_version(bin_self())
+	if len(lv) > 0 && lv != rv {
+		write(2, "[update] a newer linux-use is available (" + lv + " → " + rv + "). Run: linux-use update\n")
+	}
+}
+
+// ---------------------------------------------------------------- install (cli-update-spec §6)
+
+func cmd_install(prefix) (out, code) {
+	code = EX_OK
+	bin := bin_self()
+	system("mkdir -p " + prefix)
+	target := prefix + "/linux-use"
+	cc, _, ce := exec("cp " + bin + " " + target + " && chmod +x " + target)
+	if cc != 0 {
+		code = EX_RSS_LIMIT
+		out = errjson(EX_RSS_LIMIT, "permission_denied", "cannot write " + target + ": " + trim(ce), false, []string{"choose a writable prefix: linux-use install --prefix ~/bin"})
+		return
+	}
+	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("installed", jstr(target)) + "}"
+	pp := env("PATH")
+	if index(pp, prefix) < 0 {
+		write(2, "[install] note: " + prefix + " is not on PATH\n")
+	}
+}
+
+func cmd_uninstall(prefix) (out, code) {
+	code = EX_OK
+	target := prefix + "/linux-use"
+	k, _, _ := stat(target)
+	if k != 1 {
+		out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("removed", "false") + "," + jkv("path", jstr(target)) + "}"
+		return
+	}
+	remove(target)
+	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("removed", "true") + "," + jkv("path", jstr(target)) + "}"
 }
 
 // ---------------------------------------------------------------- dispatch
@@ -3029,7 +3543,7 @@ func need_a11y() (out, code) {
 	code = EX_OK
 	if !a11y_up() {
 		code = EX_NO_A11Y
-		out = errjson("no_a11y", "cannot reach the AT-SPI accessibility bus", false, []string{"run: linux-use doctor", "enable it: gsettings set org.gnome.desktop.interface toolkit-accessibility true"})
+		out = errjson(EX_NO_A11Y, "no_a11y", "cannot reach the AT-SPI accessibility bus", false, []string{"run: linux-use doctor", "enable it: gsettings set org.gnome.desktop.interface toolkit-accessibility true"})
 	}
 }
 
@@ -3038,7 +3552,7 @@ func run_cmd(argv) (out, code) {
 	code = EX_OK
 	if len(argv) < 2 {
 		code = EX_USAGE
-		out = errjson("no_command", "no command given", true, []string{"run: linux-use guide", "or: linux-use help-json"})
+		out = errjson(EX_USAGE, "no_command", "no command given", true, []string{"run: linux-use guide", "or: linux-use help-json"})
 		return
 	}
 	cmd := argv[1]
@@ -3054,7 +3568,8 @@ func run_cmd(argv) (out, code) {
 	fs = flag_int(fs, "max-rss", "", "0", "watch: exit 90 above this RSS in kB (0 = unlimited)")
 	fs = flag_str(fs, "events", "e", "", "comma-separated AT-SPI event types")
 	fs = flag_str(fs, "via", "", "", "sendtext mechanism: auto|clipboard|atspi")
-	fs = flag_int(fs, "port", "p", "7777", "daemon port")
+	fs = flag_str(fs, "host", "", "", "serve/daemon bind host (default 127.0.0.1, env LINUX_USE_HOST)")
+	fs = flag_int(fs, "port", "p", "0", "daemon port (default 7777, env LINUX_USE_PORT)")
 	fs = flag_int(fs, "pid", "", "0", "disambiguate --app by process id")
 	fs = flag_int(fs, "x", "", "-1", "pointer x")
 	fs = flag_int(fs, "y", "", "-1", "pointer y")
@@ -3075,6 +3590,12 @@ func run_cmd(argv) (out, code) {
 	fs = flag_int(fs, "last", "", "200", "stats: metrics window size")
 	fs = flag_str(fs, "format", "", "json", "output format: json|lines")
 	fs = flag_bool(fs, "human", "", "human-readable output (guide only)")
+	fs = flag_str(fs, "kind", "", "note", "feedback kind: bug|idea|praise|note")
+	fs = flag_str(fs, "context", "", "", "feedback: what you were doing")
+	fs = flag_str(fs, "prefix", "", "", "install/uninstall target dir (default ~/.local/bin)")
+	fs = flag_bool(fs, "check", "", "update: check only, exit 5 if stale")
+	fs = flag_bool(fs, "force", "", "update: re-download even if current")
+	fs = flag_bool(fs, "off", "", "telemetry: persist the opt-out")
 	fs = parse_flags(fs, rest)
 	pos := flag_args(fs)
 
@@ -3101,6 +3622,22 @@ func run_cmd(argv) (out, code) {
 	maxnodes := flag_int_val(fs, "max-nodes")
 	wantPid = flag_int_val(fs, "pid")
 	port := flag_int_val(fs, "port")
+	if port <= 0 {
+		ep := env("LINUX_USE_PORT")
+		if len(ep) > 0 {
+			port = parse_int(ep)
+		}
+	}
+	if port <= 0 {
+		port = 7777
+	}
+	host := flag_get(fs, "host")
+	if len(host) == 0 {
+		host = env("LINUX_USE_HOST")
+	}
+	if len(host) == 0 {
+		host = "127.0.0.1"
+	}
 
 	if cmd == "guide" {
 		if flag_on(fs, "human") {
@@ -3133,7 +3670,7 @@ func run_cmd(argv) (out, code) {
 		return
 	}
 	if cmd == "serve" {
-		out, code = cmd_serve(port)
+		out, code = cmd_serve(host, port)
 		return
 	}
 	if cmd == "daemon" {
@@ -3141,7 +3678,35 @@ func run_cmd(argv) (out, code) {
 		if len(pos) > 0 {
 			sub = pos[0]
 		}
-		out, code = cmd_daemon(sub, port)
+		out, code = cmd_daemon(sub, host, port)
+		return
+	}
+	if cmd == "feedback" {
+		msg := ""
+		if len(pos) > 0 {
+			msg = pos[0]
+		}
+		out, code = cmd_feedback(msg, flag_get(fs, "kind"), flag_get(fs, "context"))
+		return
+	}
+	if cmd == "telemetry" {
+		out, code = cmd_telemetry(flag_on(fs, "off"))
+		return
+	}
+	if cmd == "update" {
+		out, code = cmd_update(flag_on(fs, "check"), flag_on(fs, "force"))
+		return
+	}
+	if cmd == "install" || cmd == "uninstall" {
+		prefix := flag_get(fs, "prefix")
+		if len(prefix) == 0 {
+			prefix = env("HOME") + "/.local/bin"
+		}
+		if cmd == "install" {
+			out, code = cmd_install(prefix)
+		} else {
+			out, code = cmd_uninstall(prefix)
+		}
 		return
 	}
 	if cmd == "pointer" {
@@ -3173,7 +3738,7 @@ func run_cmd(argv) (out, code) {
 	if cmd == "key" {
 		if len(pos) < 1 {
 			code = EX_USAGE
-			out = errjson("missing_arg", "key needs a combo", true, []string{"example: linux-use key ctrl+shift+t"})
+			out = errjson(EX_USAGE, "missing_arg", "key needs a combo", true, []string{"example: linux-use key ctrl+shift+t"})
 			return
 		}
 		out, code = cmd_key(pos[0], flag_on(fs, "dry-run"))
@@ -3203,12 +3768,12 @@ func run_cmd(argv) (out, code) {
 		}
 		if len(appname) == 0 {
 			code = EX_USAGE
-			out = errjson("missing_app", "state needs --app <name>", true, []string{"run: linux-use apps"})
+			out = errjson(EX_USAGE, "missing_app", "state needs --app <name>", true, []string{"run: linux-use apps"})
 			return
 		}
 		if wantFormat != "json" && wantFormat != "lines" {
 			code = EX_USAGE
-			out = errjson("bad_format", "--format must be 'json' or 'lines'", true, []string{"example: linux-use state --app gnome-calculator --format lines"})
+			out = errjson(EX_USAGE, "bad_format", "--format must be 'json' or 'lines'", true, []string{"example: linux-use state --app gnome-calculator --format lines"})
 			return
 		}
 		if flag_get(fs, "via") == "cdp" {
@@ -3225,12 +3790,12 @@ func run_cmd(argv) (out, code) {
 	if cmd == "find" {
 		if len(pos) < 1 {
 			code = EX_USAGE
-			out = errjson("missing_query", "find needs a query string", true, []string{"example: linux-use find Save --app gedit"})
+			out = errjson(EX_USAGE, "missing_query", "find needs a query string", true, []string{"example: linux-use find Save --app gedit"})
 			return
 		}
 		if wantFormat != "json" && wantFormat != "lines" {
 			code = EX_USAGE
-			out = errjson("bad_format", "--format must be 'json' or 'lines'", true, []string{"example: linux-use find Save --format lines"})
+			out = errjson(EX_USAGE, "bad_format", "--format must be 'json' or 'lines'", true, []string{"example: linux-use find Save --format lines"})
 			return
 		}
 		out, code = cmd_find(pos[0], flag_get(fs, "app"), depth, maxnodes)
@@ -3243,7 +3808,7 @@ func run_cmd(argv) (out, code) {
 	if cmd == "act" {
 		if len(pos) < 1 {
 			code = EX_USAGE
-			out = errjson("missing_ref", "act needs a ref", true, []string{"get one from: linux-use state --app <app>"})
+			out = errjson(EX_USAGE, "missing_ref", "act needs a ref", true, []string{"get one from: linux-use state --app <app>"})
 			return
 		}
 		out, code = cmd_act(pos[0], flag_get(fs, "action"))
@@ -3252,7 +3817,7 @@ func run_cmd(argv) (out, code) {
 	if cmd == "read" {
 		if len(pos) < 1 {
 			code = EX_USAGE
-			out = errjson("missing_ref", "read needs a ref", true, []string{"get one from: linux-use state --app <app>"})
+			out = errjson(EX_USAGE, "missing_ref", "read needs a ref", true, []string{"get one from: linux-use state --app <app>"})
 			return
 		}
 		out, code = cmd_read(pos[0])
@@ -3261,7 +3826,7 @@ func run_cmd(argv) (out, code) {
 	if cmd == "type" {
 		if len(pos) < 2 {
 			code = EX_USAGE
-			out = errjson("missing_arg", "type needs <ref> <text>", true, []string{"example: linux-use type 'gedit:/0/1#123' hello"})
+			out = errjson(EX_USAGE, "missing_arg", "type needs <ref> <text>", true, []string{"example: linux-use type 'gedit:/0/1#123' hello"})
 			return
 		}
 		out, code = cmd_type(pos[0], pos[1], flag_on(fs, "replace"), flag_on(fs, "allow-password"))
@@ -3276,7 +3841,7 @@ func run_cmd(argv) (out, code) {
 		py := flag_int_val(fs, "y")
 		if len(ref) == 0 && (px < 0 || py < 0) {
 			code = EX_USAGE
-			out = errjson("missing_target", "click needs a <ref> or --x/--y", true, []string{"example: linux-use click --x 100 --y 200"})
+			out = errjson(EX_USAGE, "missing_target", "click needs a <ref> or --x/--y", true, []string{"example: linux-use click --x 100 --y 200"})
 			return
 		}
 		out, code = cmd_click(ref, px, py, flag_int_val(fs, "button"))
@@ -3285,7 +3850,7 @@ func run_cmd(argv) (out, code) {
 	if cmd == "launch" {
 		if len(pos) < 1 {
 			code = EX_USAGE
-			out = errjson("missing_command", "launch needs a command", true, []string{"example: linux-use launch gnome-calculator --wait-for gnome-calculator"})
+			out = errjson(EX_USAGE, "missing_command", "launch needs a command", true, []string{"example: linux-use launch gnome-calculator --wait-for gnome-calculator"})
 			return
 		}
 		out, code = cmd_launch(pos[0], flag_get(fs, "wait-for"), flag_int_val(fs, "timeout"))
@@ -3293,13 +3858,26 @@ func run_cmd(argv) (out, code) {
 	}
 
 	code = EX_USAGE
-	out = errjson("unknown_command", "no such command '"+cmd+"'", true, []string{"run: linux-use help-json"})
+	out = errjson(EX_USAGE, "unknown_command", "no such command '"+cmd+"'", true, []string{"run: linux-use help-json"})
+}
+
+func nudge_ok(cmd) (b) {
+	b = cmd == "apps" || cmd == "windows" || cmd == "state" || cmd == "find" || cmd == "stats" || cmd == "doctor" || cmd == "roles"
 }
 
 func main() {
-	out, code := run_cmd(args())
+	argv := args()
+	current_verb = "none"
+	if len(argv) > 1 {
+		current_verb = argv[1]
+	}
+	out, code := run_cmd(argv)
 	if len(out) > 0 {
 		println(out)
 	}
+	if nudge_ok(current_verb) {
+		version_nudge()
+	}
+	tel_finish(code)
 	exit(code)
 }
