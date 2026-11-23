@@ -3198,7 +3198,7 @@ func cmd_feedback(msg, kind, ctx) (out, code) {
 // network code; sends are detached and silent. `linux-use telemetry` prints
 // the real next payload.
 
-var telemetry_endpoint = "https://feedback.intrane.fr/v1/telemetry"
+var telemetry_endpoint = "https://grange.intrane.fr/t"
 var current_verb = ""
 
 func tel_enabled() (ok) {
