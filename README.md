@@ -154,8 +154,13 @@ watch [--app X] [--role R] [--events ...] [--max-events N] [--duration MS]
 roles                         every valid --role name
 pointer                       current pointer position
 doctor                        environment health
-serve [--port] | daemon start|stop|status
+serve [--host] [--port] | daemon start|stop|status [--host] [--port]
 guide [--human] | help-json | version
+feedback <msg>                report a bug/idea (FEEDBACK_RELAY=off to skip relay)
+telemetry [--off]             show the exact anonymous payload / disable it
+update [--check] [--force]    self-update from the content-hash version endpoint
+install [--prefix DIR]        copy binary to DIR (default ~/.local/bin)
+uninstall [--prefix DIR]      remove it
 ```
 
 ## watch — block on a UI change instead of polling
@@ -403,17 +408,24 @@ by doing it.
 
 | Spec | Status |
 |---|---|
-| cli-output-spec | ✅ stdout JSON only, stderr for warnings, semantic exit codes 80–89, typed errors with `recoverable` + `suggestions` |
-| cli-guide-spec | ✅ `guide` (JSON) and `guide --human`, plus `help-json` |
-| cli-daemon-spec | ✅ `serve`, `daemon start\|stop\|status`, `GET /_health`, `POST /_shutdown`, loopback-only, health-polled (no fixed sleeps), idempotent |
-| cli-update-spec | ⬜ deferred to v0.3 |
-| cli-feedback-spec | ⬜ deferred to v0.3 |
-| cli-telemetry-spec | ⬜ deferred to v0.3 |
+| cli-output-spec | ✅ stdout JSON only, stderr for warnings, semantic exit codes, typed errors with `recoverable` + `suggestions`, `help-json` exit-code map |
+| cli-guide-spec | ✅ `guide` (JSON) and `guide --human`, plus `help-json` and `GET /guide`, `GET /llms.txt` on the daemon |
+| cli-daemon-spec | ✅ `serve --host` (loopback `127.0.0.1` default, real bind), `daemon start\|stop\|status` idempotent, `GET /_health` with `service`+`pid`, `POST /_shutdown` responds then exits, bearer-token gated off-loopback |
+| cli-update-spec | ✅ `update [--check] [--force]` content-hash update via `GET /version.json`, atomic swap with `.bak` rollback, `install`/`uninstall`, hourly passive nudge on stderr (`LINUX_USE_NO_NUDGE=1` to silence) |
+| cli-feedback-spec | ✅ `feedback <msg>` — relay-only variant, idempotent id, never fails the caller (`FEEDBACK_RELAY=off` to skip) |
+| cli-telemetry-spec | ✅ `telemetry [--off]` — allow-listed fields only (`tool`/`version`/`event`/`verb`/`os`/`arch`/`exit_class`/`ts`), off in CI, honors `DO_NOT_TRACK=1` and `LINUX_USE_TELEMETRY=0`, one-shot disclosure on stderr |
+| cli-trial-spec | ⬜ N/A — local tool, no hosted trial tier |
 
-Exit codes: `0` ok · `80` usage · `81` no_a11y · `82` app_not_found ·
-`83` ref_stale · `84` ref_not_found · `85` no_capability · `86` action_failed ·
-`87` no_display · `88` daemon · `89` refused · `90` rss_limit.
+Exit codes: `0` ok · `3` daemon stopped · `5` update available · `80` usage ·
+`81` no_a11y · `82` app_not_found · `83` ref_stale · `84` ref_not_found ·
+`85` no_capability · `86` action_failed · `87` no_display · `88` daemon ·
+`89` refused · `90` rss_limit/permission · `100` external · `110` internal.
 Ambiguous `--app` reports `app_ambiguous` under exit `80`.
+
+Telemetry is anonymous and allow-listed; run `linux-use telemetry` to see the
+exact payload that would be sent. `linux-use telemetry --off` persists the
+opt-out, and `DO_NOT_TRACK=1` is honored. Telemetry never affects exit codes
+or command behavior.
 
 ## Measurements (Ubuntu 22.04, GNOME 42.9, X11 — on an isolated Xvfb desktop)
 

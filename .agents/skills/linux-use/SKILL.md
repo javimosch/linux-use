@@ -107,10 +107,15 @@ launch <cmd> [--wait-for APP]
 watch [--app X] [--role R] [--max-events N] [--duration MS] [--max-rss KB]
 roles                         every valid --role name
 doctor | guide | help-json | version
-serve | daemon start|stop|status
+serve [--host] [--port] | daemon start|stop|status
+feedback <msg>                report a bug/idea (FEEDBACK_RELAY=off to skip relay)
+telemetry [--off]             show the exact anonymous payload / disable it
+update [--check] [--force]    self-update; install [--prefix] / uninstall
 ```
 
 `linux-use daemon start` keeps the AT-SPI registry warm for repeated calls.
+The daemon binds `127.0.0.1` by default; a non-loopback `--host` requires the
+bearer token in `~/.linux-use/shutdown.token` for `POST /_shutdown`.
 
 ## Landmines (these will bite)
 
