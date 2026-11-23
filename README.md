@@ -432,10 +432,20 @@ Same machine, dedicated-profile Edge on Xvfb (linux-use 0.7.1) vs headless
 Chrome over CDP ([flashbrowse](https://github.com/nhrbuilds/flashbrowse)
 v1.2.1, built from source):
 
-| page | linux-use `state` | linux-use `state --expand` | flashbrowse `open` |
-|---|---|---|---|
-| 300-row table (1,500 widgets) | 0.7 s — 568 elements: rows ~0–54, the rest never entered the AT-SPI tree | ~6 s — **all 300 rows (3,018 elements)** | ~1.4 s incl. cold Chrome spawn — **all 1,200 actions** |
-| 3,000-row table (15,000 widgets) | 0.85 s — same ~560-element window; `--all` 4.6 s, truncated at 20k nodes | incremental (per-viewport scrolls, no all-or-nothing fetch) | no output in 90 s — full-AX-tree fetch/settle never finished |
+| page | linux-use `state` | linux-use `state --expand` | linux-use `state --via cdp` | flashbrowse `open` |
+|---|---|---|---|---|
+| 300-row table (1,500 widgets) | 0.7 s — 568 elements: rows ~0–54, the rest never entered the AT-SPI tree | ~6 s — **all 300 rows (3,018 elements)** | **0.4 s — all 900 widgets, full document** | ~1.4 s incl. cold Chrome spawn — **all 1,200 actions** |
+| 3,000-row table (15,000 widgets) | 0.85 s — same ~560-element window; `--all` 4.6 s, truncated at 20k nodes | incremental (per-viewport scrolls, no all-or-nothing fetch) | one DOM query, same shape | no output in 90 s — full-AX-tree fetch/settle never finished |
+
+`state --via cdp` skips the AX tree entirely: one `Runtime.evaluate` DOM
+query returns every interactive element with document coordinates and an
+xpath ref (~60 ms internal on this page; wall time is mostly binary
+startup). `act` on a `cdp<PID>:<xpath>#fp` ref fires a real DOM `click()`
+through the same channel — no pointer, no focus, works while the window is
+occluded. It needs `--remote-debugging-port` on the browser's command line,
+which means a **dedicated profile** (`contrib/a11y-browser` with
+`A11Y_CDP_PORT=PORT`) — Chromium refuses the flag on the live profile, and
+that is the correct boundary anyway.
 
 Neither column is a "linux-use is faster" claim. AT-SPI is fast because
 Chromium only materializes AX nodes near the viewport; `--expand` closes the
@@ -466,10 +476,10 @@ flashbrowse for the public web, linux-use for the session.
 - [x] **metrics trail** — `state`/`find` append to
   `~/.cache/linux-use/metrics.jsonl`; `linux-use stats` aggregates
   min/avg/max ms per op (landed)
-- [ ] **CDP fast path** (`state --via cdp`) — only for dedicated-profile
-  instances launched with `--remote-debugging-port`; matches flashbrowse
-  speed on web content while AT-SPI keeps covering chrome/desktop. Never
-  against the live profile.
+- [x] **CDP fast path** (`state --via cdp` + `act` on `cdp:` refs) — one
+  `Runtime.evaluate` DOM query for the whole page (~60 ms internal),
+  xpath refs, real DOM `click()` for act; dedicated-profile instances only
+  (landed)
 
 ## Hard-won machin FFI findings
 

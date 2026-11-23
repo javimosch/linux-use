@@ -137,11 +137,18 @@ case "$MODE" in
 		;;
 esac
 
+CDP_ARGS=""
+if [ -n "$A11Y_CDP_PORT" ]; then
+	CDP_ARGS="--remote-debugging-port=$A11Y_CDP_PORT"
+	echo "a11y-browser[$NAME]: CDP on 127.0.0.1:$A11Y_CDP_PORT (linux-use state --via cdp)"
+fi
+
 DISPLAY="$TARGET" setsid "$BROWSER" \
 	--user-data-dir="$PROFILE" \
 	--force-renderer-accessibility \
 	--no-first-run --no-default-browser-check \
 	--class="a11y-browser-$NAME" \
+	$CDP_ARGS \
 	"$URL" >"$STATE/browser-$NAME.log" 2>&1 &
 
 sleep 1

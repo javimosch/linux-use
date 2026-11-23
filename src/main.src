@@ -77,6 +77,10 @@ extern "lu" {
 	fn lu_role_count() i32
 	fn lu_rss_kb() i32
 	fn lu_role_name_of(ptr) string
+	fn lu_http_get(string, i32, string) ptr
+	fn lu_ws_open(string) i32
+	fn lu_ws_call(i32, string) ptr
+	fn lu_ws_close(i32)
 }
 
 extern "x11" {
@@ -1416,6 +1420,183 @@ func cmd_state(appname, maxdepth, maxnodes) (out, code) {
 	}
 }
 
+// ---- CDP fast path (--via cdp) --------------------------------------
+// For dedicated-profile browsers launched with --remote-debugging-port:
+// one Runtime.evaluate DOM query returns every interactive element in
+// ~20ms — the whole document, no scroll sweep. Refs carry the pid and an
+// xpath ("cdp<PID>:/html/...#fp") so `act` re-discovers the ws url and
+// fires a real DOM click — works occluded, no pointer. NEVER used on the
+// live profile (its port is unreachable by policy anyway).
+
+// cdppid parses the pid out of a cdp ref's app field ("cdp<PID>").
+func cdppid(app) (pid) {
+	pid = 0
+	if len(app) > 3 && substr(app, 0, 3) == "cdp" {
+		pid = parse_int(substr(app, 3, len(app)))
+	}
+}
+
+// cdp_port reads --remote-debugging-port=N off a process cmdline (0 none).
+func cdp_port(pid) (port) {
+	port = 0
+	_, cl, _ := exec("tr '\\0' ' ' </proc/" + str(pid) + "/cmdline 2>/dev/null")
+	parts := split(cl, "--remote-debugging-port=")
+	if len(parts) > 1 {
+		port = parse_int(split(parts[1], " ")[0])
+	}
+}
+
+// cdp_ws_url returns the ws debugger url of the browser's LAST page target
+// (the most recently opened tab), "" when the process has no debug port.
+func cdp_ws_url(pid) (ws) {
+	ws = ""
+	port := cdp_port(pid)
+	if port <= 0 {
+		return
+	}
+	body := takestr(lu_http_get("127.0.0.1", port, "/json/list"))
+	segs := split(body, "{")
+	i := 0
+	while i < len(segs) {
+		s := segs[i]
+		if contains(s, "\"type\": \"page\"") && contains(s, "webSocketDebuggerUrl") {
+			ws = split(split(s, "\"webSocketDebuggerUrl\": \"")[1], "\"")[0]
+		}
+		i = i + 1
+	}
+}
+
+func jsesc(s) (r) {
+	r = replace(s, "\\", "\\\\")
+	r = replace(r, "\"", "\\\"")
+	r = replace(r, "\n", "\\n")
+	r = replace(r, "\r", "\\r")
+	r = replace(r, "\t", "\\t")
+}
+
+var cdpCallId = 0
+// cdp_eval sends Runtime.evaluate and returns the string result value.
+// Our expressions emit TSV with fields pre-sanitized, so the only JSON
+// escape inside "value" is \n — unescaped back to real newlines here.
+func cdp_eval(wsurl, expr) (v, ok) {
+	v = ""
+	ok = false
+	fd := lu_ws_open(wsurl)
+	if fd < 0 {
+		return
+	}
+	cdpCallId = cdpCallId + 1
+	msg := "{\"id\":" + str(cdpCallId) + ",\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":\"" + jsesc(expr) + "\",\"returnByValue\":true}}"
+	resp := takestr(lu_ws_call(fd, msg))
+	lu_ws_close(fd)
+	if len(resp) == 0 || contains(resp, "\"exceptionDetails\"") {
+		return
+	}
+	v = replace(replace(jfieldstr(resp, "value"), "\\n", "\n"), "\\t", "\t")
+	ok = true
+}
+
+var cdpElementsJS = "(()=>{const xp=e=>{let p=[];while(e&&e.nodeType===1){let i=1,s=e.previousElementSibling;while(s){if(s.tagName===e.tagName)i++;s=s.previousElementSibling}p.unshift(e.tagName.toLowerCase()+'['+i+']');e=e.parentElement}return'/'+p.join('/')};const MR=e=>{const t=e.tagName.toLowerCase();const r=(e.getAttribute('role')||'').toLowerCase();if(r)return r;if(t==='a')return'link';if(t==='button')return'push button';if(t==='select')return'combo box';if(t==='textarea')return'entry';if(t==='summary')return'push button';if(t==='input'){const y=(e.getAttribute('type')||'text').toLowerCase();if(y==='checkbox')return'check box';if(y==='radio')return'radio button';if(y==='submit'||y==='button')return'push button';if(y==='password')return'password text';return'entry'}return t};const out=[];document.querySelectorAll('a[href],button,input,select,textarea,[role],summary,[tabindex],[contenteditable=\"true\"]').forEach(el=>{const r=el.getBoundingClientRect();if(r.width<1||r.height<1)return;const cs=getComputedStyle(el);if(cs.display==='none'||cs.visibility==='hidden')return;const n=(el.getAttribute('aria-label')||el.innerText||el.value||el.getAttribute('title')||'').replace(/[\\t\\n\\r\\\\\"']/g,' ').trim().slice(0,120);out.push([MR(el),n,Math.round(r.x+scrollX),Math.round(r.y+scrollY),Math.round(r.width),Math.round(r.height),xp(el)].join('\\t'))});return out.join('\\n')})()"
+
+// cmd_state_cdp is the --via cdp perception path: one DOM query for every
+// interactive element on the page, document coordinates, xpath refs.
+func cmd_state_cdp(appname) (out, code) {
+	code = EX_OK
+	out = ""
+	app := findapp(appname)
+	if app == 0 {
+		if appAmbiguous > 1 {
+			code = EX_USAGE
+			out = errjson("app_ambiguous", str(appAmbiguous)+" applications are named '"+appname+"'", true, []string{"disambiguate with the pid: --app '" + appname + "#pid<PID>' or --pid <PID>", "list pids with: linux-use apps"})
+			return
+		}
+		code = EX_APP_NOT_FOUND
+		out = errjson("app_not_found", "no application named '"+appname+"' in the accessibility tree", true, []string{"run: linux-use apps", "the app may not be running, or may not export accessibility (see: linux-use doctor)"})
+		return
+	}
+	pid := atspi_accessible_get_process_id(app, 0)
+	g_object_unref(app)
+	ws := cdp_ws_url(pid)
+	if len(ws) == 0 {
+		code = EX_USAGE
+		out = errjson("cdp_unavailable", "'"+appname+"' has no --remote-debugging-port on its command line", true, []string{"relaunch the dedicated profile with the flag — contrib/a11y-browser: A11Y_CDP_PORT=PORT", "the live profile cannot expose a debug port (Chromium refuses it) — plain 'state' works there"})
+		return
+	}
+	t0 := now_ms()
+	tsv, ok := cdp_eval(ws, cdpElementsJS)
+	ms := now_ms() - t0
+	if !ok {
+		code = EX_ACTION_FAILED
+		out = errjson("cdp_call_failed", "Runtime.evaluate failed or returned no result", true, []string{"the page may be navigating — retry", "check the ws url: "+ws})
+		return
+	}
+	rows := []string{}
+	lns := split(tsv, "\n")
+	i := 0
+	while i < len(lns) {
+		f := split(lns[i], "\t")
+		i = i + 1
+		if len(f) >= 7 {
+			role := f[0]
+			nm := f[1]
+			ref := "cdp" + str(pid) + ":" + f[6] + "#" + fp(role, nm)
+			geom := f[2] + "," + f[3] + "," + f[4] + "," + f[5]
+			if wantFormat == "lines" {
+				rows = append(rows, ref + "\t" + role + "\t" + cleanline(nm) + "\t" + geom + "\tclick+1\t-")
+			} else {
+				rows = append(rows, "{"+jkv("ref", jstr(ref))+","+jkv("ref_kind", jstr("cdp"))+","+jkv("ref_ok", "true")+","+jkv("role", jstr(role))+","+jkv("name", jstr(nm))+","+jkv("x", f[2])+","+jkv("y", f[3])+","+jkv("w", f[4])+","+jkv("h", f[5])+","+jkv("actions", jarr([]string{jstr("click")}))+"}")
+			}
+		}
+	}
+	recordmetric("state", appname+" via:cdp", ms, len(rows), "cdp", 0)
+	if wantFormat == "lines" {
+		out = "# linux-use state app=" + appname + " count=" + str(len(rows)) + " method=cdp walk_ms=" + str(ms) + "\n" + join(rows, "\n")
+	} else {
+		f := []string{}
+		f = append(f, jkv("schema", jstr(SCHEMA)))
+		f = append(f, jkv("ok", "true"))
+		f = append(f, jkv("app", jstr(appname)))
+		f = append(f, jkv("elements", jarr(rows)))
+		f = append(f, jkv("count", str(len(rows))))
+		f = append(f, jkv("walk_ms", str(ms)))
+		f = append(f, jkv("method", jstr("cdp")))
+		f = append(f, jkv("note", jstr("document coordinates; refs are cdp<pid>:xpath")))
+		out = "{" + join(f, ",") + "}"
+	}
+}
+
+// cmd_act_cdp fires a real DOM click() through CDP — no pointer, no focus,
+// works while the window is occluded. Refs come from 'state --via cdp'.
+func cmd_act_cdp(ref) (out, code) {
+	code = EX_OK
+	out = ""
+	app, path, want := splitref(ref)
+	pid := cdppid(app)
+	if pid <= 0 || len(path) == 0 || substr(path, 0, 1) != "/" {
+		code = EX_USAGE
+		out = errjson("bad_ref", "cdp ref must look like 'cdp<PID>:/html/...#fp' — take one from 'state --via cdp'", true, []string{"run: linux-use state --app <app> --via cdp"})
+		return
+	}
+	ws := cdp_ws_url(pid)
+	if len(ws) == 0 {
+		code = EX_USAGE
+		out = errjson("cdp_unavailable", "pid "+str(pid)+" has no --remote-debugging-port on its command line", true, []string{"the browser must have been launched with the flag"})
+		return
+	}
+	v, ok := cdp_eval(ws, "(()=>{var e=document.evaluate(\""+path+"\",document,null,9,null).singleNodeValue;if(!e)return 'missing';e.click();return 'ok'})()")
+	if !ok {
+		code = EX_ACTION_FAILED
+		out = errjson("cdp_call_failed", "Runtime.evaluate failed", true, []string{"the page may be navigating — retry", "re-run: linux-use state --app <app> --via cdp"})
+		return
+	}
+	if v == "missing" {
+		code = EX_REF_STALE
+		out = errjson("ref_stale", "no element at "+path+" — the page changed since the ref was issued", true, []string{"re-run: linux-use state --app <app> --via cdp"})
+		return
+	}
+	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("ref", jstr(ref)) + "," + jkv("action", jstr("click")) + "," + jkv("via", jstr("cdp")) + "}"
+}
+
 // rowname extracts the element name from an emitted row — "name" field in
 // JSON, third tab-separated field in lines format.
 func rowname(r) (n) {
@@ -1591,6 +1772,10 @@ func getnode(ref) (node, out, code) {
 }
 
 func cmd_act(ref, which) (out, code) {
+	if len(ref) > 3 && substr(ref, 0, 3) == "cdp" {
+		out, code = cmd_act_cdp(ref)
+		return
+	}
 	node, out, code := getnode(ref)
 	if code != EX_OK {
 		return
@@ -2640,7 +2825,7 @@ func guide_json() (r) {
 	g = append(g, jstr("For a label whose NAME IS ITS TEXT, the fingerprint changes whenever the text changes, so a ref captured from an event will report ref_stale on the next read. That is the mechanism working: the staleness IS the signal that the content changed. Re-run state, or drop the #fingerprint to address the path alone."))
 	g = append(g, jstr("OBSERVER EFFECT: reading the tree (state/find) can itself make toolkits emit accessibility events. If you run 'watch' while also polling 'state', expect self-induced noise — especially object:state-changed:*, which is why it is not in the default event set."))
 	g = append(g, jstr("Large apps (browsers) have huge trees. Use --role, --depth, or 'find' rather than dumping everything; a truncated walk warns on stderr and sets truncated:true."))
-	g = append(g, jstr("On long web pages, state/find only see the nodes Chromium has realized — roughly the viewport plus a margin (measured: a 300-row table exposed ~55 rows). Widgets below the fold are absent from the tree entirely, so find returns no match for them. 'state --expand' automates the fix: it invokes the scrollable container's scrollForward/scrollDown accessible action when one exists (a full viewport per call, works occluded, no pointer) or XTEST wheel clicks at the window center otherwise, merges each pass by ref path, then scrolls back — envelope fields expanded/expand_passes/expand_ms report what happened; --expand-passes/--expand-wait tune it. To reach ONE below-fold widget prefer 'find <query> --app X --expand' — same sweep, returns only matches. Manual equivalent: scroll (click --button 5) then re-run state."))
+	g = append(g, jstr("On long web pages, state/find only see the nodes Chromium has realized — roughly the viewport plus a margin (measured: a 300-row table exposed ~55 rows). Widgets below the fold are absent from the tree entirely, so find returns no match for them. 'state --expand' automates the fix: it invokes the scrollable container's scrollForward/scrollDown accessible action when one exists (a full viewport per call, works occluded, no pointer) or XTEST wheel clicks at the window center otherwise, merges each pass by ref path, then scrolls back — envelope fields expanded/expand_passes/expand_ms report what happened; --expand-passes/--expand-wait tune it. To reach ONE below-fold widget prefer 'find <query> --app X --expand' — same sweep, returns only matches. If the browser is a dedicated-profile instance with --remote-debugging-port, 'state --via cdp' reads the whole DOM in one ~60ms query and act on its cdp<pid>:xpath refs fires a real DOM click — never usable on the live profile, which cannot expose a debug port. Manual equivalent: scroll (click --button 5) then re-run state."))
 	g = append(g, jstr("state and find take --format lines: one element per line (ref, role, name, x,y,w,h, action, flags) — roughly half the tokens of the JSON envelope. Metadata moves to a leading # line; errors stay JSON."))
 	g = append(g, jstr("NEVER automate the user's LIVE browser profile with Playwright/CDP: the forced --use-mock-keychain makes the cookie DB undecryptable and Chromium RESETS it (all site sessions wiped, unrecoverable — secure_delete zeroes deleted rows). Same for --user-data-dir=<real profile>. Always use a dedicated profile dir (contrib/a11y-browser) or a throwaway COPY of the profile. Driving the live session via AT-SPI (this tool) is safe; it touches no profile internals. Also note: the Edge process is 'msedge', not 'microsoft-edge' — a pgrep for the latter sees nothing while the browser is running."))
 	c = append(c, jkv("gotchas", jarr(g)))
@@ -2691,10 +2876,10 @@ func helpjson() (r) {
 	cmds := []string{}
 	cmds = append(cmds, "{"+jkv("name", jstr("apps"))+","+jkv("args", jarr([]string{}))+","+jkv("summary", jstr("list applications with pid, toolkit and window count; flags ambiguous names"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("windows"))+","+jkv("args", jarr([]string{jstr("--app")}))+","+jkv("summary", jstr("list top-level windows with geometry and active state"))+"}")
-	cmds = append(cmds, "{"+jkv("name", jstr("state"))+","+jkv("args", jarr([]string{jstr("--app (required)"), jstr("--depth"), jstr("--role"), jstr("--all"), jstr("--expand"), jstr("--format")}))+","+jkv("summary", jstr("interactive elements of an app, with refs; --expand scrolls to realize below-fold nodes, --format lines is compact"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("state"))+","+jkv("args", jarr([]string{jstr("--app (required)"), jstr("--depth"), jstr("--role"), jstr("--all"), jstr("--expand"), jstr("--via cdp"), jstr("--format")}))+","+jkv("summary", jstr("interactive elements of an app, with refs; --expand scrolls to realize below-fold nodes, --via cdp reads the whole DOM in one query (debugging-port browsers), --format lines is compact"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("find"))+","+jkv("args", jarr([]string{jstr("<query>"), jstr("--app"), jstr("--role"), jstr("--depth"), jstr("--expand"), jstr("--format")}))+","+jkv("summary", jstr("search elements by name substring; --expand sweeps below the fold (needs --app)"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("stats"))+","+jkv("args", jarr([]string{jstr("--last N")}))+","+jkv("summary", jstr("aggregate ~/.cache/linux-use/metrics.jsonl — per-op calls and min/avg/max ms"))+"}")
-	cmds = append(cmds, "{"+jkv("name", jstr("act"))+","+jkv("args", jarr([]string{jstr("<ref>"), jstr("--action N")}))+","+jkv("summary", jstr("invoke the element's accessible action (preferred)"))+"}")
+	cmds = append(cmds, "{"+jkv("name", jstr("act"))+","+jkv("args", jarr([]string{jstr("<ref>"), jstr("--action N")}))+","+jkv("summary", jstr("invoke the element's accessible action (preferred); cdp: refs fire a real DOM click"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("read"))+","+jkv("args", jarr([]string{jstr("<ref>")}))+","+jkv("summary", jstr("read an element's text, name and description"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("type"))+","+jkv("args", jarr([]string{jstr("<ref>"), jstr("<text>"), jstr("--replace"), jstr("--allow-password")}))+","+jkv("summary", jstr("insert text via the editable-text interface"))+"}")
 	cmds = append(cmds, "{"+jkv("name", jstr("paste"))+","+jkv("args", jarr([]string{jstr("<text>"), jstr("--no-restore")}))+","+jkv("summary", jstr("put text on the clipboard and ctrl+v it — the safe way to type into Chromium"))+"}")
@@ -3024,6 +3209,10 @@ func run_cmd(argv) (out, code) {
 		if wantFormat != "json" && wantFormat != "lines" {
 			code = EX_USAGE
 			out = errjson("bad_format", "--format must be 'json' or 'lines'", true, []string{"example: linux-use state --app gnome-calculator --format lines"})
+			return
+		}
+		if flag_get(fs, "via") == "cdp" {
+			out, code = cmd_state_cdp(appname)
 			return
 		}
 		out, code = cmd_state(appname, depth, maxnodes)
