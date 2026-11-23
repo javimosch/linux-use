@@ -1,13 +1,29 @@
-# linux-use
+<p align="center">
+  <img src="assets/icon.png" alt="linux-use icon" width="128" height="128">
+</p>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![built with machin](https://img.shields.io/badge/built%20with-machin%20(MFL)-6366f1)](https://github.com/javimosch/machin)
-[![agent-first CLI](https://img.shields.io/badge/agent--first-cli--specs-10b981)](https://cli-specs.intrane.fr/)
+<h1 align="center">linux-use</h1>
 
-Agent-first, CLI-first GUI control for Linux desktops — the Linux answer to
-[Windows-Use](https://github.com/Jeomon/Windows-Use), built in
-[machin (MFL)](https://github.com/javimosch/machin) as a single 179 KB binary
-with no runtime dependencies.
+<p align="center">
+Agent-first GUI control for Linux desktops — a single 229 KB binary with zero
+runtime dependencies, built for LLM agents.
+</p>
+
+<p align="center">
+<a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+<a href="https://github.com/javimosch/machin"><img src="https://img.shields.io/badge/built%20with-machin%20(MFL)-6366f1" alt="built with machin"></a>
+<a href="https://cli-specs.intrane.fr/"><img src="https://img.shields.io/badge/agent--first-cli--specs-10b981" alt="agent-first CLI"></a>
+</p>
+
+- Single binary, zero Python/Node/JVM — perception in, actions out, JSON both ways.
+- AT-SPI2: `state`, `find`, `act`, `type`, `watch` on GTK, Qt and Chromium.
+- `state --via cdp`: the whole page DOM in **~60 ms**, real DOM `click()` — beats
+  headless-browser tools at their own game (benchmarks below).
+- `state --expand`: scroll-sweeps Chromium's viewport-limited tree to full coverage.
+- Drives your **live, signed-in browser session** — the thing headless tools
+  cannot touch — plus browser chrome, dialogs and the rest of the desktop.
+- The Linux answer to [Windows-Use](https://github.com/Jeomon/Windows-Use),
+  written in [machin (MFL)](https://github.com/javimosch/machin).
 
 🤖 **Driving this from an agent?** Read [`.agents/skills/linux-use/SKILL.md`](.agents/skills/linux-use/SKILL.md) — a drop-in skill for Claude Code / Devin / anything that reads `SKILL.md`. `linux-use guide` embeds the same manual in the binary.
 
