@@ -115,6 +115,7 @@ var EX_NO_DISPLAY = 87
 var EX_DAEMON = 88
 var EX_REFUSED = 89
 var EX_RSS_LIMIT = 90
+var EX_NO_INJECTOR = 91
 var EX_EXT = 100
 var EX_INTERNAL = 110
 
@@ -130,7 +131,7 @@ var ST_VISIBLE = 30
 var COORD_SCREEN = 0
 var KEY_STRING = 4
 
-var VERSION = "0.7.2"
+var VERSION = "0.9.0"
 var SCHEMA = "linux-use/v1"
 
 // ---------------------------------------------------------------- json utils
@@ -689,6 +690,7 @@ var wantAll = false
 var wantRole = ""
 var wantText = ""
 var wantExpand = false
+var wantInjector = ""
 var wantExpandMax = 25
 var wantExpandWait = 400
 var wantFormat = "json"
@@ -1886,6 +1888,15 @@ func cmd_type(ref, text, replace, allowpw) (out, code) {
 		// into an unknown focus is genuinely dangerous: a space character
 		// presses whatever button happens to be focused. That is not
 		// hypothetical — it closed a browser during testing.
+		if has_xclip() {
+			ie, ic := injector_check()
+			if ic != EX_OK {
+				g_object_unref(node)
+				out = ie
+				code = ic
+				return
+			}
+		}
 		comp := atspi_accessible_get_component_iface(node)
 		if comp != 0 {
 			atspi_component_grab_focus(comp, 0)
@@ -1922,6 +1933,92 @@ func cmd_type(ref, text, replace, allowpw) (out, code) {
 
 func xopen() (dpy) {
 	dpy = XOpenDisplay(env("DISPLAY"))
+}
+
+// ---------------------------------------------------------------- injector
+
+// Every synthetic-input call goes through the injector_* functions below, so a
+// new backend (uinput, libei — issue #1) is added here and nowhere else.
+// XTEST is the only backend today.
+
+// injector_select picks a backend: --injector, then LINUX_USE_INJECTOR, then
+// autodetect. name is "" when nothing is usable; reason then says why.
+func injector_select() (name, source, reason) {
+	name = ""
+	reason = ""
+	req := wantInjector
+	source = "flag"
+	if len(req) == 0 {
+		req = env("LINUX_USE_INJECTOR")
+		source = "env"
+	}
+	if len(req) > 0 && req != "auto" {
+		if req == "xtest" {
+			name = "xtest"
+		} else {
+			reason = "unknown injector '" + req + "' (implemented: xtest)"
+		}
+		return
+	}
+	source = "autodetect"
+	st := env("XDG_SESSION_TYPE")
+	if st == "wayland" || (st != "x11" && len(env("WAYLAND_DISPLAY")) > 0) {
+		reason = "Wayland session: XTEST cannot reach native Wayland clients and no Wayland-capable injector is implemented yet"
+		return
+	}
+	name = "xtest"
+}
+
+// injector_check returns code EX_OK when a backend is usable, otherwise the
+// typed error envelope. Call it BEFORE any side effect (focus, clipboard).
+func injector_check() (out, code) {
+	code = EX_OK
+	out = ""
+	name, source, reason := injector_select()
+	if len(name) > 0 {
+		return
+	}
+	if source != "autodetect" {
+		code = EX_USAGE
+		out = errjson(EX_USAGE, "unknown_injector", reason, true, []string{"use --injector xtest, or --injector auto", "check LINUX_USE_INJECTOR"})
+		return
+	}
+	code = EX_NO_INJECTOR
+	out = errjson(EX_NO_INJECTOR, "no_injector", reason, true, []string{"use the accessibility action instead: linux-use act <ref>", "for text fields: linux-use type <ref> <text> (works when the widget is natively editable)", "only if the target is an XWayland app: --injector xtest (or LINUX_USE_INJECTOR=xtest)"})
+}
+
+// injector_open returns 0 when no backend is selected or it cannot be opened.
+func injector_open() (h) {
+	h = 0
+	name, _, _ := injector_select()
+	if name == "xtest" {
+		h = xopen()
+	}
+}
+
+func injector_move(h, x, y) {
+	XTestFakeMotionEvent(h, -1, x, y, 0)
+}
+
+func injector_button(h, button, press) {
+	XTestFakeButtonEvent(h, button, press, 0)
+}
+
+func injector_key(h, keycode, press) {
+	XTestFakeKeyEvent(h, keycode, press, 0)
+}
+
+// injector_keycode is layout-dependent.
+func injector_keycode(h, keysym) (kc) {
+	kc = XKeysymToKeycode(h, keysym)
+}
+
+func injector_sync(h) {
+	XSync(h, false)
+}
+
+func injector_close(h) {
+	XCloseDisplay(h)
 }
 
 func keysym_alias(tok) (name, found) {
@@ -2122,6 +2219,12 @@ func cmd_sendtext(text, via) (out, code) {
 			out = errjson(EX_NO_CAPABILITY, "xclip_missing", "--via clipboard needs xclip on PATH", true, []string{"sudo apt install xclip"})
 			return
 		}
+		ie, ic := injector_check()
+		if ic != EX_OK {
+			out = ie
+			code = ic
+			return
+		}
 		ok, restored := clip_paste(text, true)
 		if !ok {
 			code = EX_ACTION_FAILED
@@ -2176,18 +2279,18 @@ func clip_paste(text, restore) (ok, restored) {
 	system("xclip -selection clipboard -i " + tmp + " >/dev/null 2>&1 &")
 	sleep(200)
 
-	dpy := xopen()
-	if dpy == 0 {
+	h := injector_open()
+	if h == 0 {
 		return
 	}
-	ctrl := XKeysymToKeycode(dpy, XStringToKeysym("Control_L"))
-	v := XKeysymToKeycode(dpy, XStringToKeysym("v"))
-	XTestFakeKeyEvent(dpy, ctrl, 1, 0)
-	XTestFakeKeyEvent(dpy, v, 1, 0)
-	XTestFakeKeyEvent(dpy, v, 0, 0)
-	XTestFakeKeyEvent(dpy, ctrl, 0, 0)
-	XSync(dpy, false)
-	XCloseDisplay(dpy)
+	ctrl := injector_keycode(h, XStringToKeysym("Control_L"))
+	v := injector_keycode(h, XStringToKeysym("v"))
+	injector_key(h, ctrl, 1)
+	injector_key(h, v, 1)
+	injector_key(h, v, 0)
+	injector_key(h, ctrl, 0)
+	injector_sync(h)
+	injector_close(h)
 	sleep(250)
 	ok = true
 
@@ -2212,6 +2315,12 @@ func cmd_paste(text, restore) (out, code) {
 		out = errjson(EX_NO_CAPABILITY, "xclip_missing", "paste needs xclip on PATH", true, []string{"sudo apt install xclip", "or force the unsafe path: linux-use sendtext --via atspi '<text>'"})
 		return
 	}
+	ie, ic := injector_check()
+	if ic != EX_OK {
+		out = ie
+		code = ic
+		return
+	}
 	ok, restored := clip_paste(text, restore)
 	if !ok {
 		code = EX_ACTION_FAILED
@@ -2223,7 +2332,21 @@ func cmd_paste(text, restore) (out, code) {
 
 func cmd_key(combo, dryrun) (out, code) {
 	code = EX_OK
-	dpy := xopen()
+	// --dry-run sends nothing, so it only needs a display to resolve keycodes.
+	if !dryrun {
+		ie, ic := injector_check()
+		if ic != EX_OK {
+			out = ie
+			code = ic
+			return
+		}
+	}
+	dpy := 0
+	if dryrun {
+		dpy = xopen()
+	} else {
+		dpy = injector_open()
+	}
 	if dpy == 0 {
 		code = EX_NO_DISPLAY
 		out = errjson(EX_NO_DISPLAY, "no_display", "cannot open X display '"+env("DISPLAY")+"'", false, []string{"this build injects input via XTEST and needs an X11 session", "run: linux-use doctor"})
@@ -2238,14 +2361,14 @@ func cmd_key(combo, dryrun) (out, code) {
 		if len(t) > 0 {
 			nm, ks := resolve_keysym(t)
 			if ks == 0 {
-				XCloseDisplay(dpy)
+				injector_close(dpy)
 				code = EX_USAGE
 				out = errjson(EX_USAGE, "unknown_key", "'"+t+"' is not a known key name", true, []string{"keysym names are CASE-SENSITIVE: F4 not f4 (f1-f12 are accepted either way)", "aliases: ctrl shift alt super enter esc tab space backspace delete insert up down left right home end pageup pagedown print menu pause", "list every valid name with: xmodmap -pke"})
 				return
 			}
-			kc := XKeysymToKeycode(dpy, ks)
+			kc := injector_keycode(dpy, ks)
 			if kc == 0 {
-				XCloseDisplay(dpy)
+				injector_close(dpy)
 				code = EX_USAGE
 				out = errjson(EX_USAGE, "unmapped_key", "'"+nm+"' has no keycode in the current layout", true, []string{"the active keyboard layout cannot produce this key"})
 				return
@@ -2256,13 +2379,13 @@ func cmd_key(combo, dryrun) (out, code) {
 		i = i + 1
 	}
 	if len(codes) == 0 {
-		XCloseDisplay(dpy)
+		injector_close(dpy)
 		code = EX_USAGE
 		out = errjson(EX_USAGE, "empty_combo", "no keys given", true, []string{"example: linux-use key ctrl+shift+t"})
 		return
 	}
 	if dryrun {
-		XCloseDisplay(dpy)
+		injector_close(dpy)
 		q := []string{}
 		i = 0
 		while i < len(resolved) {
@@ -2274,16 +2397,16 @@ func cmd_key(combo, dryrun) (out, code) {
 	}
 	i = 0
 	while i < len(codes) {
-		XTestFakeKeyEvent(dpy, codes[i], 1, 0)
+		injector_key(dpy, codes[i], 1)
 		i = i + 1
 	}
 	i = len(codes) - 1
 	while i >= 0 {
-		XTestFakeKeyEvent(dpy, codes[i], 0, 0)
+		injector_key(dpy, codes[i], 0)
 		i = i - 1
 	}
-	XSync(dpy, false)
-	XCloseDisplay(dpy)
+	injector_sync(dpy)
+	injector_close(dpy)
 	q := []string{}
 	i = 0
 	while i < len(resolved) {
@@ -2295,22 +2418,28 @@ func cmd_key(combo, dryrun) (out, code) {
 
 func clickxy(x, y, button) (ok) {
 	ok = false
-	dpy := xopen()
-	if dpy == 0 {
+	h := injector_open()
+	if h == 0 {
 		return
 	}
-	XTestFakeMotionEvent(dpy, -1, x, y, 0)
-	XSync(dpy, false)
+	injector_move(h, x, y)
+	injector_sync(h)
 	sleep(40)
-	XTestFakeButtonEvent(dpy, button, 1, 0)
-	XTestFakeButtonEvent(dpy, button, 0, 0)
-	XSync(dpy, false)
-	XCloseDisplay(dpy)
+	injector_button(h, button, 1)
+	injector_button(h, button, 0)
+	injector_sync(h)
+	injector_close(h)
 	ok = true
 }
 
 func cmd_click(ref, px, py, button) (out, code) {
 	code = EX_OK
+	ie, ic := injector_check()
+	if ic != EX_OK {
+		out = ie
+		code = ic
+		return
+	}
 	x := px
 	y := py
 	label := "coordinates"
@@ -2418,6 +2547,12 @@ func cmd_doctor() (out, code) {
 		f = append(f, jkv("text_entry_actual", jstr("clipboard+ctrl_v")))
 	}
 
+	iname, isource, ireason := injector_select()
+	f = append(f, jkv("injector", jstr(iname)))
+	f = append(f, jkv("injector_source", jstr(isource)))
+	f = append(f, jkv("injectors_available", jarr([]string{jstr("xtest")})))
+	f = append(f, jkv("injector_reason", jstr(ireason)))
+
 	probs := []string{}
 	if !tkon {
 		probs = append(probs, jstr("toolkit-accessibility is off — Qt/Java/Electron apps may expose nothing. Fix: gsettings set org.gnome.desktop.interface toolkit-accessibility true"))
@@ -2429,10 +2564,14 @@ func cmd_doctor() (out, code) {
 		probs = append(probs, jstr("xclip is missing, so text entry falls back to AT-SPI key synthesis, which CRASHES Chromium/Edge started with --force-renderer-accessibility (issue #4). Fix: sudo apt install xclip"))
 	}
 	if !xok {
-		probs = append(probs, jstr("no X display — click/key actuation unavailable (Wayland is not supported in v0.1; AT-SPI actions still work)"))
+		probs = append(probs, jstr("no X display — click/key actuation unavailable (AT-SPI actions still work)"))
 	}
-	if env("XDG_SESSION_TYPE") == "wayland" {
-		probs = append(probs, jstr("Wayland session: XTEST cannot reach native Wayland clients. Prefer 'act' over 'click'."))
+	if len(iname) == 0 {
+		probs = append(probs, jstr("no usable input injector — " + ireason + ". Prefer 'act'; click/key exit " + str(EX_NO_INJECTOR) + "."))
+	} else {
+		if env("XDG_SESSION_TYPE") == "wayland" {
+			probs = append(probs, jstr("Wayland session with xtest forced: input reaches XWayland apps only."))
+		}
 	}
 	f = append(f, jkv("ok", jbool(len(probs) == 0)))
 	f = append(f, jkv("problems", jarr(probs)))
@@ -2845,7 +2984,7 @@ func guide_json() (r) {
 	g = append(g, jstr("SAFETY: 'type <ref>' now verifies the element actually took focus before synthesizing keystrokes, and fails with focus_refused rather than typing into an unknown target. 'sendtext' does NOT — it types wherever focus is, by design, so confirm focus yourself (check focused:true in state) before using it. A stray space presses whatever button is focused."))
 	g = append(g, jstr("'type' uses the editable-text interface when available (deterministic, no focus needed) and falls back to synthesized keystrokes. It REFUSES password fields unless --allow-password."))
 	g = append(g, jstr("X keysym names are CASE-SENSITIVE: 'F4' resolves and plain 'f4' would not — except f1-f12 are accepted in either case, alongside aliases (ctrl shift alt super enter esc tab space backspace delete insert up down left right home end pageup pagedown print menu pause). Check a combo without firing it: 'linux-use key alt+F4 --dry-run'."))
-	g = append(g, jstr("'key' needs X11: it maps keysyms through the active keyboard layout via XTEST. On Wayland it will fail — use 'act' instead."))
+	g = append(g, jstr("INPUT INJECTOR: click, key, paste, sendtext (clipboard route) and the type keyboard fallback inject input through a backend chosen by --injector, then LINUX_USE_INJECTOR, then autodetect. Only 'xtest' exists, so on a Wayland session these exit 91 (no_injector) instead of silently doing nothing — use 'act' there. --injector xtest forces it, which reaches XWayland apps only. 'key' maps keysyms through the active keyboard layout. 'doctor' reports the selected backend and why."))
 	g = append(g, jstr("state/find run a SERVER-SIDE collection query when you pass --role (measured ~9x faster on a large app: 5ms vs 47ms) and a recursive tree walk otherwise. The `method` field says which ran; force either with --collection / --walk."))
 	g = append(g, jstr("A collection result may contain elements with ref_ok:false — matched, on screen, but their path could not be proven, so no ref is given. They are still listed rather than dropped. Use --walk if you need a ref for every element."))
 	g = append(g, jstr("Valid --role names come from `linux-use roles` (130 of them, 18 interactive by default). An unrecognised role matches nothing and warns on stderr."))
@@ -2899,7 +3038,7 @@ func guide_human() (r) {
 	ls = append(ls, "GOTCHAS")
 	ls = append(ls, "  SHOWING != visible to the user (an occluded widget is still SHOWING).")
 	ls = append(ls, "  0 elements means 'no accessibility', not 'empty window'.")
-	ls = append(ls, "  key needs X11. Wayland: use act.")
+	ls = append(ls, "  key/click/paste need X11 (Wayland: exit 91, use act).")
 	ls = append(ls, "  NEVER point Playwright/CDP at the user's LIVE browser profile — it wipes")
 	ls = append(ls, "  the cookie DB (undecryptable under --use-mock-keychain -> reset). Copy first.")
 	ls = append(ls, "")
@@ -2949,11 +3088,13 @@ func helpjson() (r) {
 	xc = append(xc, jkv("87", jstr("no_display: cannot open the X display")))
 	xc = append(xc, jkv("89", jstr("refused (safety refusal)")))
 	xc = append(xc, jkv("90", jstr("rss_limit (watch --max-rss) or permission denied")))
+	xc = append(xc, jkv("91", jstr("no_injector: no usable input backend (e.g. Wayland) — use act")))
 	xc = append(xc, jkv("100", jstr("external/integration: download, daemon start, network")))
 	xc = append(xc, jkv("110", jstr("internal: daemon stop did not complete")))
 	envs := []string{}
 	envs = append(envs, jstr("LINUX_USE_HOST"))
 	envs = append(envs, jstr("LINUX_USE_PORT"))
+	envs = append(envs, jstr("LINUX_USE_INJECTOR"))
 	envs = append(envs, jstr("LINUX_USE_SERVER"))
 	envs = append(envs, jstr("LINUX_USE_NO_NUDGE"))
 	envs = append(envs, jstr("LINUX_USE_TELEMETRY"))
@@ -3185,11 +3326,12 @@ func cmd_feedback(msg, kind, ctx) (out, code) {
 	}
 	if relay != "off" {
 		resp := https_post(relay + "/v1/feedback", body)
-		if len(resp) > 0 {
+		rk, rerr := json_get(resp, ".ok")
+		if len(rerr) == 0 && strip_quotes(rk) == "true" {
 			relayed = 1
 		}
 	}
-	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("id", jstr(id)) + "," + jkv("stored", "0") + "," + jkv("relayed", str(relayed)) + "}"
+	out = "{" + jkv("schema", jstr(SCHEMA)) + "," + jkv("ok", "true") + "," + jkv("data", "{" + jkv("id", jstr(id)) + "," + jkv("stored", "0") + "," + jkv("relayed", str(relayed)) + "}") + "}"
 }
 
 // ---------------------------------------------------------------- telemetry (cli-telemetry-spec)
@@ -3197,7 +3339,7 @@ func cmd_feedback(msg, kind, ctx) (out, code) {
 // network code; sends are detached and silent. `linux-use telemetry` prints
 // the real next payload.
 
-var telemetry_endpoint = "https://feedback.intrane.fr/v1/telemetry"
+var telemetry_endpoint = "https://grange.intrane.fr/t"
 var current_verb = ""
 
 func tel_enabled() (ok) {
@@ -3427,6 +3569,7 @@ func cmd_update(check, force) (out, code) {
 		return
 	}
 	tmp := "/tmp/linux-use-update-" + to_hex(rand_bytes(4))
+	mkdir(tmp)
 	newbin := tmp + "/linux-use"
 	durl := dl
 	if has_prefix(durl, "/") {
@@ -3489,8 +3632,8 @@ func version_nudge() {
 		return
 	}
 	write_file(cf, str(now()))
-	status, body, e := http_get(update_base() + "/version.json")
-	if len(e) > 0 || status != 200 {
+	nc, body, _ := exec("curl -sf -m 3 \"" + update_base() + "/version.json\"")
+	if nc != 0 {
 		return
 	}
 	rv, verr := json_get(body, ".version")
@@ -3509,9 +3652,9 @@ func version_nudge() {
 func cmd_install(prefix) (out, code) {
 	code = EX_OK
 	bin := bin_self()
-	system("mkdir -p " + prefix)
+	system("mkdir -p \"" + prefix + "\"")
 	target := prefix + "/linux-use"
-	cc, _, ce := exec("cp " + bin + " " + target + " && chmod +x " + target)
+	cc, _, ce := exec("cp \"" + bin + "\" \"" + target + "\" && chmod +x \"" + target + "\"")
 	if cc != 0 {
 		code = EX_RSS_LIMIT
 		out = errjson(EX_RSS_LIMIT, "permission_denied", "cannot write " + target + ": " + trim(ce), false, []string{"choose a writable prefix: linux-use install --prefix ~/bin"})
@@ -3596,10 +3739,12 @@ func run_cmd(argv) (out, code) {
 	fs = flag_bool(fs, "check", "", "update: check only, exit 5 if stale")
 	fs = flag_bool(fs, "force", "", "update: re-download even if current")
 	fs = flag_bool(fs, "off", "", "telemetry: persist the opt-out")
+	fs = flag_str(fs, "injector", "", "", "input backend: auto|xtest (env LINUX_USE_INJECTOR)")
 	fs = parse_flags(fs, rest)
 	pos := flag_args(fs)
 
 	wantAll = flag_on(fs, "all")
+	wantInjector = flag_get(fs, "injector")
 	// Policy, from measurement: a collection query wins in proportion to how
 	// SELECTIVE it is (9x with a --role filter on a big app; a wash when asking
 	// for every interactive role, where per-match path reconstruction eats the
