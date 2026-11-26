@@ -404,8 +404,8 @@ working one.
    always correct for the installed version. Read this before improvising.
 2. **The repo README** — measured benchmarks, the AT-SPI landmines in detail,
    and an explicit table of what is verified vs untested.
-3. **Issues** — <https://github.com/javimosch/linux-use/issues>. Wayland support
-   is [#1](https://github.com/javimosch/linux-use/issues/1) and open.
+3. **Issues** — <https://github.com/javimosch/linux-use/issues>. Wayland input
+   ([#1](https://github.com/javimosch/linux-use/issues/1)) is closed as not planned: use `act`.
 4. **The `sheetgen` skill** — a worked application of everything above:
    generating images with no API key by driving a signed-in model in a
    browser. `contrib/sheetgen/` in this repo. Every landmine here that

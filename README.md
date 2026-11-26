@@ -59,7 +59,7 @@ not claims — they are gaps.
 | **Electron apps** | not tested | expected to need the same flag |
 | **Java (Swing/AWT)** | not tested | needs `java-atk-wrapper` |
 | **Flutter / canvas / games** | expected to expose nothing | not tested |
-| **Wayland** | `click`/`key`/`paste` exit 91 (`no_injector`) | XTEST cannot reach native Wayland clients; AT-SPI paths are expected to keep working (not tested). Tracked in [#1](https://github.com/javimosch/linux-use/issues/1) |
+| **Wayland** | `click`/`key`/`paste` exit 91 (`no_injector`) | XTEST cannot reach native Wayland clients; AT-SPI paths are expected to keep working (not tested). A Wayland injector is not planned ([#1](https://github.com/javimosch/linux-use/issues/1)) |
 
 **Tested on exactly one configuration:** Ubuntu 22.04.3, GNOME 42.9, X11,
 at-spi2-core 2.44.0, x86-64. Everything else is unknown territory:
@@ -574,7 +574,9 @@ These cost real debugging time and are the non-obvious part of this codebase.
 - **Wayland is unsupported for synthetic input.** XTEST cannot reach native
   Wayland clients, so on Wayland `click`/`key`/`paste` fail with exit 91
   (`no_injector`) rather than pretending to succeed; `--injector xtest` forces
-  XTEST for XWayland apps. AT-SPI `act`/`read` do not depend on the injector. This is the single biggest gap: Ubuntu 24.04+ defaults to Wayland.
+  XTEST for XWayland apps. AT-SPI `act`/`read` do not depend on the injector.
+  Wayland input is **not planned** ([#1](https://github.com/javimosch/linux-use/issues/1), closed); note that Ubuntu 24.04+
+  defaults to Wayland.
 - **On long web pages, `state`/`find` see only viewport-realized nodes.**
   Measured: a 300-row table exposed ~55 rows. Widgets below the fold are
   absent from the tree entirely — scroll, then re-run `state`. See the CDP
@@ -593,12 +595,8 @@ These cost real debugging time and are the non-obvious part of this codebase.
 
 1. **An automated test suite.** The most valuable missing thing: today every
    claim here rests on manual runs.
-2. A `uinput` injector backend for Wayland ([#1](https://github.com/javimosch/linux-use/issues/1)). The backend
-   seam and `--injector` selection exist; only `xtest` is implemented.
-3. Consecutive-event dedupe in `watch`.
-4. The remaining three specs: update, feedback, telemetry.
-5. Screenshots + a vision fallback for the apps that expose no tree.
-6. supercli/MCP registration + a `SKILL.md`.
+2. Consecutive-event dedupe in `watch`.
+3. Screenshots + a vision fallback for the apps that expose no tree.
 
 ## Layout
 

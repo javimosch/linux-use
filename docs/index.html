@@ -39,7 +39,7 @@
   <header class="py-16 sm:py-20 border-b border-[#1f2937]">
     <img src="assets/icon.png" alt="linux-use icon" class="w-20 h-20 rounded-2xl mb-8">
     <div class="flex items-center gap-2 mb-6 flex-wrap">
-      <span class="tagchip !text-[#86efac] !border-[#22c55e]/25">v0.7.1</span>
+      <span class="tagchip !text-[#86efac] !border-[#22c55e]/25">v0.9.1</span>
       <span class="tagchip">229 KB static binary</span>
       <span class="tagchip">zero deps</span>
       <span class="tagchip">MIT</span>
@@ -175,7 +175,7 @@ $ linux-use watch --app gnome-calculator --role editbar --duration 5000</pre>
           <tr><td class="py-1.5 pr-4 text-gray-300">Qt 5 apps</td><td class="text-[#22c55e] font-medium">verified</td><td class="text-gray-500">menus actuated via ShowMenu</td></tr>
           <tr><td class="py-1.5 pr-4 text-gray-300">Chromium/Edge web content</td><td class="text-amber-400 font-medium">needs a flag</td><td class="text-gray-500"><code>--force-renderer-accessibility</code>; <code>--via cdp</code> needs a debug port</td></tr>
           <tr><td class="py-1.5 pr-4 text-gray-300">Electron, Java, Flutter</td><td class="text-gray-500">not tested</td><td class="text-gray-500">—</td></tr>
-          <tr><td class="py-1.5 pr-4 text-gray-300">Wayland</td><td class="text-red-400 font-medium">click/key broken</td><td class="text-gray-500">AT-SPI paths still work</td></tr>
+          <tr><td class="py-1.5 pr-4 text-gray-300">Wayland</td><td class="text-red-400 font-medium">click/key unsupported</td><td class="text-gray-500">exits 91 <code>no_injector</code>; not planned; use <code>act</code> (untested on real Wayland)</td></tr>
         </tbody>
       </table>
       <p class="text-gray-500 text-sm mt-4 leading-relaxed">
@@ -193,7 +193,7 @@ $ linux-use watch --app gnome-calculator --role editbar --duration 5000</pre>
 gsettings set org.gnome.desktop.interface toolkit-accessibility true
 ./build.sh          <span class="text-gray-600"># or grab the binary from Releases</span>
 linux-use doctor    <span class="text-gray-600"># tells you what's missing</span></pre>
-    <p class="text-gray-500 text-sm mt-3">X11 today. On Wayland the accessibility paths still work; synthetic input does not.</p>
+    <p class="text-gray-500 text-sm mt-3">X11 only for synthetic input. On Wayland it exits 91 (<code>no_injector</code>) and support is not planned; the accessibility paths should still work (untested).</p>
   </section>
 
   <!-- machin -->

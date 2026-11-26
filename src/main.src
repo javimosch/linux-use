@@ -1937,9 +1937,8 @@ func xopen() (dpy) {
 
 // ---------------------------------------------------------------- injector
 
-// Every synthetic-input call goes through the injector_* functions below, so a
-// new backend (uinput, libei — issue #1) is added here and nowhere else.
-// XTEST is the only backend today.
+// Every synthetic-input call goes through the injector_* functions below.
+// XTEST is the only backend; Wayland backends are not planned (issue #1).
 
 // injector_select picks a backend: --injector, then LINUX_USE_INJECTOR, then
 // autodetect. name is "" when nothing is usable; reason then says why.
