@@ -59,7 +59,7 @@ not claims — they are gaps.
 | **Electron apps** | not tested | expected to need the same flag |
 | **Java (Swing/AWT)** | not tested | needs `java-atk-wrapper` |
 | **Flutter / canvas / games** | expected to expose nothing | not tested |
-| **Wayland** | `click`/`key` do not work | XTEST cannot reach native Wayland clients; AT-SPI paths still work. Tracked in [#1](https://github.com/javimosch/linux-use/issues/1) |
+| **Wayland** | `click`/`key`/`paste` exit 91 (`no_injector`) | XTEST cannot reach native Wayland clients; AT-SPI paths are expected to keep working (not tested). Tracked in [#1](https://github.com/javimosch/linux-use/issues/1) |
 
 **Tested on exactly one configuration:** Ubuntu 22.04.3, GNOME 42.9, X11,
 at-spi2-core 2.44.0, x86-64. Everything else is unknown territory:
@@ -419,7 +419,7 @@ by doing it.
 Exit codes: `0` ok · `3` daemon stopped · `5` update available · `80` usage ·
 `81` no_a11y · `82` app_not_found · `83` ref_stale · `84` ref_not_found ·
 `85` no_capability · `86` action_failed · `87` no_display · `88` daemon ·
-`89` refused · `90` rss_limit/permission · `100` external · `110` internal.
+`89` refused · `90` rss_limit/permission · `91` no_injector · `100` external · `110` internal.
 Ambiguous `--app` reports `app_ambiguous` under exit `80`.
 
 Telemetry is anonymous and allow-listed; run `linux-use telemetry` to see the
@@ -572,8 +572,9 @@ These cost real debugging time and are the non-obvious part of this codebase.
   expose nothing. `state` returning 0 elements means "no accessibility", not
   "empty window" — see the capability table above.
 - **Wayland is unsupported for synthetic input.** XTEST cannot reach native
-  Wayland clients, so `click`/`key` are X11-only. AT-SPI `act`/`type`/`read`
-  still work. This is the single biggest gap: Ubuntu 24.04+ defaults to Wayland.
+  Wayland clients, so on Wayland `click`/`key`/`paste` fail with exit 91
+  (`no_injector`) rather than pretending to succeed; `--injector xtest` forces
+  XTEST for XWayland apps. AT-SPI `act`/`read` do not depend on the injector. This is the single biggest gap: Ubuntu 24.04+ defaults to Wayland.
 - **On long web pages, `state`/`find` see only viewport-realized nodes.**
   Measured: a 300-row table exposed ~55 rows. Widgets below the fold are
   absent from the tree entirely — scroll, then re-run `state`. See the CDP
@@ -592,10 +593,9 @@ These cost real debugging time and are the non-obvious part of this codebase.
 
 1. **An automated test suite.** The most valuable missing thing: today every
    claim here rests on manual runs.
-2. Injector backend abstraction for Wayland ([#1](https://github.com/javimosch/linux-use/issues/1)) — the difference between
-   working on 22.04 and on a current default desktop.
-3. Consecutive-event dedupe in `watch` (`xtest | uinput | libei | portal`) so Wayland
-   becomes a backend rather than a rewrite.
+2. A `uinput` injector backend for Wayland ([#1](https://github.com/javimosch/linux-use/issues/1)). The backend
+   seam and `--injector` selection exist; only `xtest` is implemented.
+3. Consecutive-event dedupe in `watch`.
 4. The remaining three specs: update, feedback, telemetry.
 5. Screenshots + a vision fallback for the apps that expose no tree.
 6. supercli/MCP registration + a `SKILL.md`.

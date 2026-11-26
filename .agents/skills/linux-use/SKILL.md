@@ -192,7 +192,7 @@ bearer token in `~/.linux-use/shutdown.token` for `POST /_shutdown`.
 
 Exit codes: `0` ok · `80` usage/ambiguous · `81` no_a11y · `82` app_not_found ·
 `83` ref_stale · `84` ref_not_found · `85` no_capability · `86` action_failed ·
-`87` no_display · `88` daemon · `89` refused · `90` rss_limit.
+`87` no_display · `88` daemon · `89` refused · `90` rss_limit · `91` no_injector (use `act`).
 
 ## Browsers and web apps
 
@@ -382,8 +382,11 @@ content** with the flag above. Tested on exactly one configuration — Ubuntu
 
 **Not tested / not working:**
 
-- **Wayland** — `click` and `key` do not work (XTEST cannot reach native Wayland
-  clients). AT-SPI paths (`act`, `type`, `read`, `state`, `watch`) still do.
+- **Wayland** — `click`, `key`, `paste`, clipboard `sendtext` and the `type`
+  keyboard fallback exit 91 (`no_injector`): XTEST cannot reach native Wayland
+  clients. Use `act`. `--injector xtest` / `LINUX_USE_INJECTOR=xtest` forces it
+  for XWayland apps only. AT-SPI paths do not use the injector (untested on a
+  real Wayland session).
   Ubuntu 24.04+ defaults to Wayland, so check `doctor` before promising anything.
 - Electron, Java (needs `java-atk-wrapper`), Flutter/canvas UIs.
 - KDE/XFCE, other distros, HiDPI/fractional scaling, multi-monitor, non-US
