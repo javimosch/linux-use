@@ -131,7 +131,7 @@ var ST_VISIBLE = 30
 var COORD_SCREEN = 0
 var KEY_STRING = 4
 
-var VERSION = "0.9.0"
+var VERSION = "0.9.1"
 var SCHEMA = "linux-use/v1"
 
 // ---------------------------------------------------------------- json utils
@@ -3479,11 +3479,13 @@ func cmd_telemetry(off) (out, code) {
 var update_server = "https://javimosch.github.io/linux-use"
 
 func bin_self() (p) {
-	p = args()[0]
-	_, abs, _ := exec("readlink -f " + p)
-	abs = trim(abs)
-	if len(abs) > 0 {
-		p = abs
+	// Ask the kernel which binary is running. args()[0] is only what the user
+	// typed: for a PATH lookup it is a bare name, which readlink would resolve
+	// against the CURRENT DIRECTORY and so point update/install at another file.
+	_, abs, _ := exec("readlink /proc/" + str(getpid()) + "/exe")
+	p = trim(abs)
+	if len(p) == 0 {
+		p = args()[0]
 	}
 }
 
